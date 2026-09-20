@@ -16,7 +16,7 @@ CLUSTER_NAME="$(cluster_name_from_config "$CONFIG")"
 K3S_IMAGE="$(k3s_image_from_config "$CONFIG")"
 CONTEXT="k3d-${CLUSTER_NAME}"
 # k3d prefixes the registry name from cluster.yaml with "k3d-".
-REGISTRY_CONTAINER="k3d-registry.localhost"
+REGISTRY_CONTAINER="registry.localhost"
 
 [[ -n "$CLUSTER_NAME" && -n "$K3S_IMAGE" ]] || die "Could not read name/image from $CONFIG"
 

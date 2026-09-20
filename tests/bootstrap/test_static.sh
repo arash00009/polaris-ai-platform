@@ -54,7 +54,7 @@ if [[ -n "$image" ]]; then
 fi
 
 # 7. Smoke manifest and script agree on the in-cluster image reference
-ref="$(grep -oE 'k3d-registry\.localhost:5000/[^" ]+' deploy/k8s-smoke/whoami.yaml | head -n1)"
+ref="$(grep -oE 'registry\.localhost:5000/[^" ]+' deploy/k8s-smoke/whoami.yaml | head -n1)"
 if grep -q "CLUSTER_REF=\"$ref\"" scripts/bootstrap/smoke-test.sh; then ok "smoke manifest and script agree on image ref ($ref)"; else bad "smoke manifest image ($ref) differs from CLUSTER_REF in smoke-test.sh"; fi
 
 # 8. No obvious secrets or local cluster credentials committed

@@ -2,7 +2,7 @@
 # scripts/bootstrap/smoke-test.sh
 # End-to-end check of the local platform:
 #   host -> local registry -> cluster image pull -> Deployment -> Service
-#   -> Traefik Ingress -> host port 8080
+#   -> Traefik Ingress -> host port 8088
 #
 # Usage: scripts/bootstrap/smoke-test.sh [--keep]   (--keep leaves the workload running)
 set -euo pipefail
@@ -23,8 +23,8 @@ NAMESPACE="polaris-smoke"
 HOST_HEADER="whoami.localhost"
 # These two values must match deploy/k3d/cluster.yaml and deploy/k8s-smoke/whoami.yaml.
 PUSH_REF="localhost:5000/smoke/whoami:v1"
-CLUSTER_REF="k3d-registry.localhost:5000/smoke/whoami:v1"
-INGRESS_URL="http://localhost:8080/"
+CLUSTER_REF="registry.localhost:5000/smoke/whoami:v1"
+INGRESS_URL="http://localhost:8088/"
 
 cleanup() {
   if [[ "$KEEP" -eq 0 ]]; then

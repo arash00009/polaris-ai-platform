@@ -27,7 +27,7 @@ spec:
       containers:
         - name: whoami
           # Pushed to the local registry by scripts/bootstrap/smoke-test.sh
-          image: k3d-registry.localhost:5000/smoke/whoami:v1
+          image: registry.localhost:5000/smoke/whoami:v1
           ports:
             - containerPort: 80
           resources:

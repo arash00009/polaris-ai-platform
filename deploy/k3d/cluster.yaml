@@ -11,21 +11,21 @@ metadata:
   name: polaris
 servers: 1
 agents: 2
-image: rancher/k3s:v1.35.8-k3s1
+image: rancher/k3s:v1.34.10-k3s1
 ports:
   # host:container — the k3d load balancer forwards to Traefik inside the cluster.
   # Ports above 1024 avoid needing root. WSL2 forwards localhost to Windows.
-  - port: 8080:80
+  - port: 8088:80
     nodeFilters:
       - loadbalancer
-  - port: 8443:443
+  - port: 8448:443
     nodeFilters:
       - loadbalancer
 registries:
   # A local, unauthenticated image registry for the inner development loop.
   # k3d prefixes the name with "k3d-":
   #   push from the host  -> localhost:5000/<repo>:<tag>
-  #   pull in the cluster -> k3d-registry.localhost:5000/<repo>:<tag>
+  #   pull in the cluster -> registry.localhost:5000/<repo>:<tag>
   create:
     name: registry.localhost
     host: "0.0.0.0"

@@ -134,7 +134,7 @@ make smoke           # builds confidence end to end; see below
 | Endpoint | Meaning |
 |----------|---------|
 | `localhost:8080` / `localhost:8443` | Traefik ingress (HTTP / HTTPS) |
-| `localhost:5000` | Local registry (push from host). In the cluster the same registry is `k3d-registry.localhost:5000` |
+| `localhost:5000` | Local registry (push from host). In the cluster the same registry is `registry.localhost:5000` |
 
 The registry is unauthenticated and local-only. Never push anything sensitive to it.
 
