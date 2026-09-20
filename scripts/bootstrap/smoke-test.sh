@@ -2,7 +2,7 @@
 # scripts/bootstrap/smoke-test.sh
 # End-to-end check of the local platform:
 #   host -> local registry -> cluster image pull -> Deployment -> Service
-#   -> Traefik Ingress -> host port 8088
+#   -> Traefik Ingress -> host ingress port (read from deploy/k3d/cluster.yaml)
 #
 # Usage: scripts/bootstrap/smoke-test.sh [--keep]   (--keep leaves the workload running)
 set -euo pipefail
@@ -21,10 +21,12 @@ CLUSTER_NAME="$(cluster_name_from_config "$CONFIG")"
 CONTEXT="k3d-${CLUSTER_NAME}"
 NAMESPACE="polaris-smoke"
 HOST_HEADER="whoami.localhost"
-# These two values must match deploy/k3d/cluster.yaml and deploy/k8s-smoke/whoami.yaml.
+# PUSH_REF/CLUSTER_REF must match deploy/k3d/cluster.yaml and deploy/k8s-smoke/whoami.yaml.
 PUSH_REF="localhost:5000/smoke/whoami:v1"
 CLUSTER_REF="registry.localhost:5000/smoke/whoami:v1"
-INGRESS_URL="http://localhost:8088/"
+INGRESS_PORT="$(host_port_for "$CONFIG" 80)"
+[[ -n "$INGRESS_PORT" ]] || die "No host port mapped to container port 80 in $CONFIG"
+INGRESS_URL="http://localhost:${INGRESS_PORT}/"
 
 cleanup() {
   if [[ "$KEEP" -eq 0 ]]; then
@@ -53,7 +55,12 @@ docker push "$PUSH_REF" >/dev/null ||
 
 log_info "3/6 Deploy workload from $CLUSTER_REF"
 kubectl --context "$CONTEXT" apply -f "$ROOT/deploy/k8s-smoke/whoami.yaml" >/dev/null
-kubectl --context "$CONTEXT" -n "$NAMESPACE" rollout status deployment/whoami --timeout=120s
+if ! kubectl --context "$CONTEXT" -n "$NAMESPACE" rollout status deployment/whoami --timeout=120s; then
+  log_fail "Deployment did not become available. Diagnostics:"
+  kubectl --context "$CONTEXT" -n "$NAMESPACE" get pods -o wide || true
+  kubectl --context "$CONTEXT" -n "$NAMESPACE" describe pods | grep -A12 '^Events:' || true
+  die "Rollout failed. Common cause: image reference not matching the registry name in cluster.yaml."
+fi
 
 log_info "4/6 Confirm the pods use the local-registry image"
 image="$(kubectl --context "$CONTEXT" -n "$NAMESPACE" get pods -l app=whoami \

@@ -19,6 +19,26 @@ Short records of significant decisions: what was chosen, why, and when to revisi
 | ADR-13 | **Docker Engine inside WSL2** (not Docker Desktop) | Lighter, Linux-native, no desktop licensing question | Docker Desktop features are needed |
 | ADR-14 | **Pinned tool versions** in `versions.env`, installed with verified checksums; Kubernetes version pinned by the k3s image | Reproducibility and supply-chain hygiene | Each upgrade, one tool at a time |
 | ADR-15 | **Helm 4** as the Helm major version | Current major at the time of writing | A chart or tool in the stack requires Helm 3 |
+| ADR-16 | **Kubernetes 1.34** (k3s v1.34.10) while WSL2 runs cgroup v1 | k3s 1.35.8 does not start on this host (kubelet refuses cgroup v1); 1.34.10 verified working | **Before 2026-10-27** (1.34 upstream end of life), or as soon as WSL2 uses cgroup v2 |
+
+## Records
+
+### ADR-16: Kubernetes 1.34 while the host uses cgroup v1
+
+Status: accepted, temporary.
+
+Context: the reference machine runs WSL2 with kernel 5.15.167.4 and cgroup v1 (`stat -fc %T /sys/fs/cgroup` prints `tmpfs`; `docker info` shows `Cgroup Version: 1`). With `rancher/k3s:v1.35.8-k3s1` the cluster never formed: `k3d-polaris-agent-0` did not register, and the logs showed the kubelet refusing to run on cgroup v1 (Kubernetes 1.35 changed this default). With `rancher/k3s:v1.34.10-k3s1` and kubectl v1.34.10 all three nodes became Ready and `make smoke` passed. According to kubernetes.io/releases (checked 2026-09-21), Kubernetes 1.34 reaches upstream end of life on **2026-10-27**; the supported minors at that date are 1.35, 1.36 and 1.37.
+
+Decision: pin the k3s image to v1.34.10-k3s1 and kubectl to v1.34.10. `make doctor` fails if `cluster.yaml` pins 1.35+ on a cgroup v1 host, so the mismatch is caught before the cluster is created.
+
+Alternatives:
+
+- Move WSL2 to cgroup v2 and run a current Kubernetes. A community write-up (not verified on this machine) says cgroup v2 is the default from WSL 2.5.1 (newer kernel), and that older versions can force it with `kernelCommandLine = cgroup_no_v1=all systemd.unified_cgroup_hierarchy=1` under `[wsl2]` in `%UserProfile%\.wslconfig`. Not done now because it changes the shared WSL2 kernel for every distribution on the machine (Docker Desktop, Podman machine, other local clusters), which is a decision to take on purpose and not in the middle of Phase 1.
+- Stay on 1.35+ and disable the kubelet check. Rejected: it hides a real host limitation and is not something to demonstrate as a production practice.
+
+Consequences: the local cluster runs a Kubernetes minor that leaves upstream support on 2026-10-27. That is acceptable for a local lab as long as it is stated plainly, and it must not be described as "current Kubernetes" in the portfolio after that date. Helm charts and manifests written in later phases must stay compatible with 1.34 and with the version it is later upgraded to.
+
+Revisit when: before 2026-10-27, or as soon as the host reports `cgroup2fs`. Procedure: check `wsl --version` (PowerShell) and `stat -fc %T /sys/fs/cgroup`; if v2, change the k3s image and `KUBECTL_VERSION` together to the same supported minor, then `make doctor && make test && make cluster-reset && make smoke`.
 
 ## Template for a new record
 

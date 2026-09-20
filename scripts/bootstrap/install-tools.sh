@@ -55,7 +55,7 @@ ORIGINAL_PATH="$PATH"
 export PATH="$PREFIX:$PATH"
 
 download() { # url dest
-  curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1" || die "Download failed: $1"
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors -o "$2" "$1" || die "Download failed: $1"
 }
 
 verify_sha256() { # file expected

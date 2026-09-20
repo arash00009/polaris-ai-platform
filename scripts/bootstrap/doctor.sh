@@ -162,6 +162,17 @@ if [[ -f "$CONFIG" ]]; then
     else
       fail "kubectl 1.$kubectl_minor vs cluster 1.$k3s_minor breaks the Kubernetes version-skew policy (max 1 minor apart)"
     fi
+
+    # Kubernetes >= 1.35: the kubelet refuses to run on cgroup v1 by default.
+    # WSL2 with an old kernel (e.g. 5.15) is cgroup v1. See docs/adr/README.md, ADR-16.
+    cg="$(cgroup_fs_type)"
+    if [[ "$cg" == "cgroup2fs" ]]; then
+      pass "Host uses cgroup v2 (any supported Kubernetes version can run)"
+    elif [[ "$k3s_minor" -ge 35 ]]; then
+      fail "Host uses cgroup v1 (${cg:-unknown}) but cluster.yaml pins Kubernetes 1.$k3s_minor: the kubelet will not start. Pin a 1.34.x k3s image, or move WSL2 to cgroup v2 (docs/troubleshooting.md)."
+    else
+      warn "Host uses cgroup v1 (${cg:-unknown}); Kubernetes 1.$k3s_minor still works, but 1.35+ will not start until WSL2 moves to cgroup v2 (ADR-16)."
+    fi
   else
     fail "No 'image:' line found in $CONFIG"
   fi
@@ -178,6 +189,19 @@ if have docker && have k3d && have jq && docker info >/dev/null 2>&1; then
     pass "k3d cluster '$name' exists"
   else
     log_info "k3d cluster '$name' does not exist yet. Create it with: make cluster-up"
+    # A missing cluster means nothing of ours should hold these ports yet.
+    if have ss; then
+      for port in $(host_ports_from_config "$CONFIG"); do
+        holder="$(ss -H -ltnp "sport = :$port" 2>/dev/null | head -n1)"
+        if [[ -n "$holder" ]]; then
+          fail "Host port $port is already in use (needed by cluster.yaml). Find it: ss -ltnp 'sport = :$port'; or a Docker container: docker ps --format '{{.Names}} {{.Ports}}' | grep $port"
+        else
+          pass "Host port $port is free"
+        fi
+      done
+    else
+      log_info "ss not found; skipping the host-port check"
+    fi
   fi
 else
   log_info "Skipped (needs docker, k3d and jq)"

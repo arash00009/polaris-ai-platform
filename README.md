@@ -13,7 +13,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | Phase | Area | Status |
 |------:|------|--------|
 | 0 | Architecture and roadmap | Done — [docs/architecture.md](docs/architecture.md) |
-| 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — scripts and docs written; verification results pending |
+| 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — cluster and smoke test verified on the target machine; final re-run of `make doctor`, `make test` and `make smoke` after the latest fixes pending |
 | 2 | AI service (FastAPI, swappable model backend) | Planned |
 | 3 | Containerization, Trivy, SBOM | Planned |
 | 4–5 | Kubernetes manifests, Helm chart, multi-environment values | Planned |
@@ -37,7 +37,7 @@ cd ~/polaris/polaris-ai-platform
 make tools-install   # pinned k3d, kubectl, helm -> ~/.local/bin (checksum-verified, no sudo)
 make doctor          # verify RAM, CPU, disk, Docker, tool versions, config consistency
 make test            # static tests (no Docker needed)
-make cluster-up      # 1 control-plane + 2 agents, Traefik, local registry
+make cluster-up      # 1 control-plane + 2 agents (Kubernetes 1.34, ADR-16), Traefik, local registry
 make smoke           # registry -> cluster -> ingress -> host, end to end
 ```
 

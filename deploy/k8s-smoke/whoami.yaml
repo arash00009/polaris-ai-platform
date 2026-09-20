@@ -1,6 +1,6 @@
 # deploy/k8s-smoke/whoami.yaml — throwaway workload used by `make smoke`.
 # Proves the whole local loop: host -> local registry -> cluster pull ->
-# Deployment -> Service -> Traefik Ingress -> host port 8080.
+# Deployment -> Service -> Traefik Ingress -> the host ingress port from cluster.yaml (8088).
 # Not a Polaris component; it is deleted after the test.
 apiVersion: v1
 kind: Namespace

@@ -54,10 +54,27 @@ if [[ -n "$image" ]]; then
 fi
 
 # 7. Smoke manifest and script agree on the in-cluster image reference
-ref="$(grep -oE 'registry\.localhost:5000/[^" ]+' deploy/k8s-smoke/whoami.yaml | head -n1)"
-if grep -q "CLUSTER_REF=\"$ref\"" scripts/bootstrap/smoke-test.sh; then ok "smoke manifest and script agree on image ref ($ref)"; else bad "smoke manifest image ($ref) differs from CLUSTER_REF in smoke-test.sh"; fi
+reg_name="$(awk '/create:/{f=1} f && /name:/{print $2; exit}' deploy/k3d/cluster.yaml)"
+ref="$(grep -oE "${reg_name//./\\.}:5000/[^\" ]+" deploy/k8s-smoke/whoami.yaml | head -n1)"
+if [[ -n "$reg_name" && -n "$ref" ]] && grep -q "CLUSTER_REF=\"$ref\"" scripts/bootstrap/smoke-test.sh; then
+  ok "smoke manifest and script use the registry name from cluster.yaml ($ref)"
+else
+  bad "smoke image ref ('$ref') must start with the registry name from cluster.yaml ('$reg_name') and match CLUSTER_REF in smoke-test.sh"
+fi
 
-# 8. No obvious secrets or local cluster credentials committed
+# 8. Host ports: parsed from cluster.yaml, numeric, and no duplicates
+ingress_port="$(host_port_for deploy/k3d/cluster.yaml 80)"
+if [[ "$ingress_port" =~ ^[0-9]+$ ]]; then ok "ingress host port read from cluster.yaml: $ingress_port"; else bad "cannot read the host port mapped to container port 80 from cluster.yaml (got '$ingress_port')"; fi
+ports="$(host_ports_from_config deploy/k3d/cluster.yaml)"
+dupes="$(sort <<<"$ports" | uniq -d)"
+if [[ -n "$ports" && -z "$dupes" ]]; then ok "host ports are unique: $(tr '\n' ' ' <<<"$ports")"; else bad "host ports missing or duplicated in cluster.yaml: '$ports'"; fi
+
+# 9. Documentation does not contradict the configuration (stale versions/ports)
+k3s_min="1.$(k3s_minor_from_image "$(k3s_image_from_config deploy/k3d/cluster.yaml)")"
+stale="$(grep -rnE "localhost:(8080|8443)\b" README.md docs scripts deploy 2>/dev/null | grep -v 'docs/troubleshooting.md' || true)"
+if [[ -z "$stale" ]]; then ok "no stale localhost:8080/8443 references (cluster is on $k3s_min, ports from cluster.yaml)"; else bad "stale port references: $stale"; fi
+
+# 10. No obvious secrets or local cluster credentials committed
 if grep -rIEl 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}' . --exclude-dir=.git --exclude=test_static.sh 2>/dev/null | grep -q .; then
   bad "secret-looking string found in repository"
 else

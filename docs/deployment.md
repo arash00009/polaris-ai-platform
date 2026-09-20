@@ -2,7 +2,7 @@
 
 This document lets another engineer reproduce the local platform from a clean Windows machine. It covers **Phase 1** (the local development platform). Later phases add their own sections.
 
-**Verified state:** the scripts and configuration were written and statically tested (`make test`, `shellcheck`). Docker, cluster creation and the smoke test have to be run on the target machine; results are recorded in the README status table and in `docs/troubleshooting.md`.
+**Verified state:** the scripts and configuration are statically tested (`make test`, `shellcheck`). Cluster creation and the smoke test were run on a real machine (Windows 11, WSL2 Ubuntu 24.04, Docker Engine 29.x, k3s v1.34.10); the problems found on the way are recorded in `docs/troubleshooting.md`.
 
 ## 1. Requirements
 
@@ -57,6 +57,17 @@ systemd=true
 
 Keep the repository on the Linux filesystem (`~/polaris/...`), never under `/mnt/c/...`.
 
+### cgroup version (matters for the Kubernetes version)
+
+Kubernetes 1.35 and newer refuse to start the kubelet on a host that uses cgroup v1. Older WSL2 kernels (for example 5.15) use cgroup v1. Check:
+
+```bash
+stat -fc %T /sys/fs/cgroup     # cgroup2fs = v2 (good), tmpfs = v1
+docker info | grep -i 'cgroup version'
+```
+
+On the reference machine (kernel 5.15.167.4) this printed `tmpfs` / `Cgroup Version: 1`, so the cluster is pinned to Kubernetes **1.34** (ADR-16). `make doctor` checks this combination and fails with an explanation if the pin and the host disagree.
+
 ## 4. Base packages and GitHub CLI
 
 ```bash
@@ -79,7 +90,16 @@ GitHub CLI (from GitHub's official apt repository):
 
 ## 5. Docker Engine (inside WSL2)
 
-Decision: Docker Engine inside WSL2 rather than Docker Desktop — lighter, Linux-native, no desktop licensing question. Installation follows Docker's official apt-repository method for Ubuntu:
+Decision: Docker Engine inside WSL2 rather than Docker Desktop (ADR-13) — lighter, Linux-native, no desktop licensing question.
+
+**First check whether Docker is already installed.** On the reference machine it was, and adding a second apt source for it broke `apt update` ("Conflicting values set for option Signed-By"):
+
+```bash
+docker --version && docker run --rm hello-world
+ls /etc/apt/sources.list.d/ | grep -i docker
+```
+
+If `docker run --rm hello-world` works, skip to section 6. If Docker is missing, install it from Docker's official apt repository. Use **one** source file only (either `docker.list` or `docker.sources`, never both):
 
 ```bash
 sudo apt update
@@ -102,7 +122,13 @@ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin d
 sudo usermod -aG docker "$USER"
 ```
 
-Restart WSL so the new group applies (`wsl --terminate <DistroName>` in PowerShell, then reopen), then verify:
+Restart the distribution so the new group applies. Run this in **Windows PowerShell**, not inside Ubuntu (get the distro name from `wsl -l -v`), then reopen the Ubuntu terminal:
+
+```powershell
+wsl --terminate Ubuntu
+```
+
+Verify:
 
 ```bash
 docker run --rm hello-world
@@ -112,7 +138,7 @@ Security note: membership of the `docker` group is equivalent to root on the WSL
 
 ## 6. Pinned tools
 
-`versions.env` pins k3d, kubectl and Helm. The Kubernetes version is pinned by the k3s image in `deploy/k3d/cluster.yaml`. kubectl must stay within one minor version of the cluster (Kubernetes version-skew policy); `make test` enforces this.
+`versions.env` pins k3d, kubectl and Helm. The Kubernetes version is pinned by the k3s image in `deploy/k3d/cluster.yaml` (currently 1.34.10; see the cgroup note in section 3 and ADR-16). kubectl must stay within one minor version of the cluster (Kubernetes version-skew policy); `make test` enforces this.
 
 ```bash
 make tools-install   # downloads to ~/.local/bin and verifies each checksum
@@ -129,11 +155,11 @@ make cluster-status
 make smoke           # builds confidence end to end; see below
 ```
 
-`make smoke` pushes a small image to the local registry, deploys it, calls it through Traefik on `http://localhost:8080`, checks the response, and cleans up.
+`make smoke` pushes a small image to the local registry, deploys it, calls it through Traefik on `http://localhost:8088`, checks the response, and cleans up.
 
 | Endpoint | Meaning |
 |----------|---------|
-| `localhost:8080` / `localhost:8443` | Traefik ingress (HTTP / HTTPS) |
+| `localhost:8088` / `localhost:8448` | Traefik ingress (HTTP / HTTPS). Set in `cluster.yaml`; 8080/8443 are avoided because other local clusters commonly use them |
 | `localhost:5000` | Local registry (push from host). In the cluster the same registry is `registry.localhost:5000` |
 
 The registry is unauthenticated and local-only. Never push anything sensitive to it.

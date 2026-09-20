@@ -5,6 +5,8 @@
 #
 # The k3s image is the ONLY place the Kubernetes version is pinned.
 # Keep kubectl (versions.env) within one minor version of it.
+# Pinned to 1.34 on purpose: on WSL2 with cgroup v1 the kubelet of Kubernetes >= 1.35
+# does not start (docs/adr/README.md, ADR-16). `make doctor` checks this.
 apiVersion: k3d.io/v1alpha5
 kind: Simple
 metadata:
@@ -15,6 +17,8 @@ image: rancher/k3s:v1.34.10-k3s1
 ports:
   # host:container — the k3d load balancer forwards to Traefik inside the cluster.
   # Ports above 1024 avoid needing root. WSL2 forwards localhost to Windows.
+  # 8088/8448 (not 8080/8443) because 8080/8443 are commonly taken by other local
+  # clusters (kind, etc.). scripts read these values from this file; change them only here.
   - port: 8088:80
     nodeFilters:
       - loadbalancer
@@ -23,7 +27,8 @@ ports:
       - loadbalancer
 registries:
   # A local, unauthenticated image registry for the inner development loop.
-  # k3d prefixes the name with "k3d-":
+  # The container is named exactly as given here (no "k3d-" prefix; verified on k3d v5.9.0).
+  # k3d writes a containerd mirror for "registry.localhost:5000" into every node:
   #   push from the host  -> localhost:5000/<repo>:<tag>
   #   pull in the cluster -> registry.localhost:5000/<repo>:<tag>
   create:

@@ -54,7 +54,7 @@ tool_version() {
   } | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
 }
 
-# "v1.35.8" -> "35"
+# "v1.34.10" -> "34"
 semver_minor() { sed -E 's/^v?[0-9]+\.([0-9]+)\..*/\1/' <<<"$1"; }
 
 # Read the top-level `image:` value from a k3d config file.
@@ -65,5 +65,24 @@ cluster_name_from_config() {
   awk '/^metadata:/ {f=1; next} f && /^[[:space:]]+name:/ {print $2; exit}' "$1"
 }
 
-# "rancher/k3s:v1.35.8-k3s1" -> "35"
+# "rancher/k3s:v1.34.10-k3s1" -> "34"
 k3s_minor_from_image() { sed -E 's/.*:v[0-9]+\.([0-9]+)\..*/\1/' <<<"$1"; }
+
+# Host port that the k3d load balancer maps to container port $2 (e.g. 80 -> 8088).
+# Reads "- port: HOST:CONTAINER" lines from a k3d config file.
+host_port_for() {
+  awk -v want="$2" '/^[[:space:]]*-[[:space:]]*port:/ {
+    split($3, a, ":"); if (a[2] == want) { print a[1]; exit }
+  }' "$1"
+}
+
+# All host ports a k3d config publishes (load balancer ports + registry hostPort), one per line.
+host_ports_from_config() {
+  awk '
+    /^[[:space:]]*-[[:space:]]*port:/ { split($3, a, ":"); print a[1] }
+    /^[[:space:]]*hostPort:/ { gsub(/"/, "", $2); print $2 }
+  ' "$1"
+}
+
+# "tmpfs" (cgroup v1 / hybrid) or "cgroup2fs" (cgroup v2) for the host.
+cgroup_fs_type() { stat -fc %T /sys/fs/cgroup 2>/dev/null || true; }
