@@ -1,0 +1,70 @@
+# deploy/k8s-smoke/whoami.yaml — throwaway workload used by `make smoke`.
+# Proves the whole local loop: host -> local registry -> cluster pull ->
+# Deployment -> Service -> Traefik Ingress -> host port 8080.
+# Not a Polaris component; it is deleted after the test.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: polaris-smoke
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami
+  namespace: polaris-smoke
+  labels:
+    app: whoami
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: whoami
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      containers:
+        - name: whoami
+          # Pushed to the local registry by scripts/bootstrap/smoke-test.sh
+          image: k3d-registry.localhost:5000/smoke/whoami:v1
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: polaris-smoke
+spec:
+  selector:
+    app: whoami
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: whoami
+  namespace: polaris-smoke
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: whoami.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: whoami
+                port:
+                  number: 80

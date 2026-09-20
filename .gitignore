@@ -1,0 +1,37 @@
+# Secrets and local credentials — never commit these
+.env
+.env.*
+!versions.env
+*.pem
+*.key
+kubeconfig
+*.kubeconfig
+.kube/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build and scan output
+dist/
+build/
+*.sbom.json
+trivy-results.*
+
+# Terraform (used later, optional)
+.terraform/
+*.tfstate
+*.tfstate.*
