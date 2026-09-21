@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polaris-ai-service"
+version = "0.2.0"
+description = "Polaris AI service: a FastAPI chat API in front of a swappable model backend"
+requires-python = ">=3.12"
+# Direct dependencies only, with the lowest tested version. The exact, reproducible set
+# (including transitive dependencies) is pinned in requirements.txt.
+dependencies = [
+  "fastapi>=0.141",
+  "uvicorn>=0.53",
+  "pydantic>=2.13,<3",
+  "pydantic-settings>=2.15,<3",
+  "httpx>=0.28,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+# Narrow on purpose: this one warning comes from inside Starlette's own test client and is
+# not ours to fix. Any other warning still shows up.
+filterwarnings = [
+  "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+]
+
+[tool.coverage.run]
+source = ["ai_service"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle and pyflakes. I: import order. B: likely bugs. UP: modern syntax.
+# S: security (bandit rules). SIM: simplifications. C4: comprehensions. RUF: ruff extras.
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# Asserts are how pytest tests work.
+"tests/*" = ["S101"]

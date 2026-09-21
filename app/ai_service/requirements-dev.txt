@@ -1,0 +1,15 @@
+# Development dependencies (tests, lint). Includes the runtime pins.
+# httpx2/httpcore2/truststore: Starlette's TestClient prefers httpx2 and warns when only httpx
+# is installed. Dev only; the service itself still uses httpx (see docs/adr, ADR-17).
+-r requirements.txt
+Pygments==2.21.0
+coverage==7.16.1
+httpcore2==2.13.0
+httpx2==2.13.0
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+pytest-cov==7.1.0
+pytest==9.1.1
+ruff==0.16.8
+truststore==0.10.4

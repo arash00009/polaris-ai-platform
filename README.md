@@ -14,7 +14,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 |------:|------|--------|
 | 0 | Architecture and roadmap | Done — [docs/architecture.md](docs/architecture.md) |
 | 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — cluster and smoke test verified on the target machine; final re-run of `make doctor`, `make test` and `make smoke` after the latest fixes pending |
-| 2 | AI service (FastAPI, swappable model backend) | Planned |
+| 2 | AI service (FastAPI, swappable model backend) | Done — verified on the target machine (2026-09-21): 87 unit tests at 99 % coverage, and the running service answered 200, 422, 404, 502 and 504 as designed. The real model backend is only tested against a fake transport until Phase 11 |
 | 3 | Containerization, Trivy, SBOM | Planned |
 | 4–5 | Kubernetes manifests, Helm chart, multi-environment values | Planned |
 | 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
@@ -39,6 +39,10 @@ make doctor          # verify RAM, CPU, disk, Docker, tool versions, config cons
 make test            # static tests (no Docker needed)
 make cluster-up      # 1 control-plane + 2 agents (Kubernetes 1.34, ADR-16), Traefik, local registry
 make smoke           # registry -> cluster -> ingress -> host, end to end
+
+make app-install     # Phase 2: AI service virtualenv with pinned dependencies
+make app-check       # lint + unit tests
+make app-run         # http://127.0.0.1:8000, POST /v1/chat
 ```
 
 `make help` lists every target.
@@ -49,6 +53,8 @@ make smoke           # registry -> cluster -> ingress -> host, end to end
 .
 ├── Makefile                 # entry point for every local task
 ├── versions.env             # pinned tool versions (single source of truth)
+├── app/
+│   └── ai_service/          # FastAPI service, ModelBackend interface, unit tests
 ├── deploy/
 │   ├── k3d/cluster.yaml     # local cluster definition (k3s image pinned here)
 │   └── k8s-smoke/           # throwaway workload used by `make smoke`
@@ -60,10 +66,11 @@ make smoke           # registry -> cluster -> ingress -> host, end to end
     ├── architecture.md      # design, diagrams, technology choices, roadmap
     ├── deployment.md        # how to reproduce the local environment
     ├── troubleshooting.md   # real errors and fixes, added as they are encountered
+    ├── component-qa.md      # the six employer questions for every component
     └── adr/README.md        # architecture decision records
 ```
 
-More directories (`app/`, `helm/`, `.github/workflows/`, …) appear as their phases are built.
+More directories (`helm/`, `.github/workflows/`, …) appear as their phases are built.
 
 ## Implemented / Demonstrated / Documented
 

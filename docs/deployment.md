@@ -164,7 +164,44 @@ make smoke           # builds confidence end to end; see below
 
 The registry is unauthenticated and local-only. Never push anything sensitive to it.
 
-## 8. Run profiles (memory budget)
+## 8. AI service (Phase 2)
+
+The service lives in `app/ai_service/` and runs locally in a Python virtualenv. It needs Python 3.12 or newer and the `venv` module (`sudo apt-get install -y python3-venv` on Ubuntu; `make doctor` checks both).
+
+```bash
+make app-install   # creates app/ai_service/.venv and installs the pinned dependencies
+make app-check     # ruff lint + format check, then pytest with coverage (fails below 95 %)
+make app-run       # serves http://127.0.0.1:8000  (interactive docs at /docs)
+```
+
+Call it from a second terminal:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/chat \
+  -H 'content-type: application/json' \
+  -d '{"tenant_id":"demo","prompt":"Explain Kubernetes pods"}'
+```
+
+**Configuration** is read from environment variables (prefix `POLARIS_`); nothing is read from files.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `POLARIS_BACKEND` | `mock` | `mock` or `openai_compat` |
+| `POLARIS_BACKEND_TIMEOUT_S` | `30` | Total time allowed for one backend call; exceeded means HTTP 504 |
+| `POLARIS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `POLARIS_MOCK_MODEL_NAME` | `mock-1` | Model name reported by the mock |
+| `POLARIS_MOCK_LATENCY_MS` | `0` | Simulated processing time |
+| `POLARIS_MOCK_FAILURE_RATE` | `0` | Fraction (0 to 1) of calls that fail on purpose |
+| `POLARIS_MOCK_SEED` | unset | Makes the failure pattern reproducible |
+| `POLARIS_OPENAI_BASE_URL` | `http://localhost:11434/v1` | Server that speaks the OpenAI chat-completions API |
+| `POLARIS_OPENAI_MODEL` | unset | Required when `POLARIS_BACKEND=openai_compat` |
+| `POLARIS_OPENAI_API_KEY` | unset | Optional bearer token; never logged |
+
+Example: `POLARIS_MOCK_LATENCY_MS=200 POLARIS_MOCK_FAILURE_RATE=0.2 make app-run`.
+
+**Dependencies.** `app/ai_service/requirements.txt` (runtime) and `requirements-dev.txt` (tests, lint) pin exact versions, including transitive dependencies, so every machine installs the same set. `pyproject.toml` lists only the direct dependencies. To upgrade deliberately: create a scratch virtualenv, install the direct dependencies unpinned, run `pip freeze`, review the diff, update both files, then run `make app-check`. `make test` fails if any line in the requirements files is not pinned with `==`.
+
+## 9. Run profiles (memory budget)
 
 Introduced progressively as components are added. Estimates only; measured values replace them in Phases 9 and 11.
 
@@ -174,7 +211,7 @@ Introduced progressively as components are added. Estimates only; measured value
 | `obs` | core + observability stack | 4–6 GB |
 | `full` | obs + delivery tooling + model server + FinOps | 7–10 GB |
 
-## 9. Teardown
+## 10. Teardown
 
 ```bash
 make cluster-down    # deletes the cluster and the registry container

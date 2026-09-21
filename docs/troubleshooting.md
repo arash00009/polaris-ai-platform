@@ -38,3 +38,17 @@ These come from the design. They are marked *expected* until reproduced on a rea
 | `make smoke`: no response from ingress *(expected)* | Traefik not ready yet, or port mapping changed | `kubectl -n kube-system get pods`; `kubectl -n polaris-smoke get ingress,pods` | `curl -H 'Host: whoami.localhost' http://localhost:8088/` returns text (use the port from `cluster.yaml`) |
 | `make smoke`: `Cannot pull traefik/whoami:...` *(expected)* | Tag unavailable or Docker Hub rate limit | `SMOKE_IMAGE=traefik/whoami:latest make smoke` | Smoke test passes |
 | Everything is slow, file watching misbehaves *(expected)* | Repository stored under `/mnt/c/...` | Move it to `~/polaris/...` on the Linux filesystem | `make doctor` shows the repo on the Linux filesystem |
+
+## Phase 2: AI service
+
+Marked *expected* until reproduced on the target machine. The last three were reproduced in the sandbox while testing (2026-09-21) and are marked *seen*.
+
+| Symptom | Likely cause | Fix | Confirm |
+|---------|--------------|-----|---------|
+| `make app-install`: `The virtual environment was not created successfully because ensurepip is not available` *(expected)* | Ubuntu splits `venv` into a separate package | `sudo apt-get install -y python3-venv`; remove the half-made `app/ai_service/.venv` and retry | `make doctor` shows "python3 can create virtualenvs" |
+| `pip install -e`: `requires a different Python: 3.10.x not in '>=3.12'` *(expected)* | `python3` on PATH is older than 3.12 | Use Ubuntu 24.04 (Python 3.12), or create the venv with `python3.12 -m venv app/ai_service/.venv` by hand | `app/ai_service/.venv/bin/python --version` prints 3.12 or newer |
+| `make app-test`: `No module named ai_service` *(expected)* | The package was not installed into the venv | `make app-install` (the last step is `pip install -e`) | `.venv/bin/python -c "import ai_service"` |
+| `make app-run`: `Address already in use` on port 8000 *(expected)* | Another process uses 8000 | `ss -ltnp 'sport = :8000'`; stop it, or run uvicorn by hand with `--port 8001` | `curl http://127.0.0.1:8000/docs` answers |
+| Service refuses to start: `POLARIS_OPENAI_MODEL must be set when POLARIS_BACKEND=openai_compat` *(seen)* | The real backend was selected without a model name | Set `POLARIS_OPENAI_MODEL` (the model is chosen in Phase 11), or unset `POLARIS_BACKEND` to use the mock | The service starts |
+| `POST /v1/chat` returns 502 `backend_error` with `reason=model backend unreachable` in the log *(seen)* | `POLARIS_BACKEND=openai_compat` but nothing listens on `POLARIS_OPENAI_BASE_URL` | Start the model server (Phase 11) or use the mock. Failure injection with `POLARIS_MOCK_FAILURE_RATE` returns the same 502 on purpose | Log shows `chat completed` |
+| `POST /v1/chat` returns 504 `backend_timeout` *(seen)* | Backend slower than `POLARIS_BACKEND_TIMEOUT_S` (or `POLARIS_MOCK_LATENCY_MS` set higher than the budget) | Raise the timeout or lower the latency | The request returns 200 |

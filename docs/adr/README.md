@@ -20,6 +20,8 @@ Short records of significant decisions: what was chosen, why, and when to revisi
 | ADR-14 | **Pinned tool versions** in `versions.env`, installed with verified checksums; Kubernetes version pinned by the k3s image | Reproducibility and supply-chain hygiene | Each upgrade, one tool at a time |
 | ADR-15 | **Helm 4** as the Helm major version | Current major at the time of writing | A chart or tool in the stack requires Helm 3 |
 | ADR-16 | **Kubernetes 1.34** (k3s v1.34.10) while WSL2 runs cgroup v1 | k3s 1.35.8 does not start on this host (kubelet refuses cgroup v1); 1.34.10 verified working | **Before 2026-10-27** (1.34 upstream end of life), or as soon as WSL2 uses cgroup v2 |
+| ADR-17 | **Python service toolchain**: FastAPI, pydantic-settings (environment only), `src` layout, exact pins in `requirements*.txt`, ruff, pytest | Mainstream, readable, testable; reproducible installs; one config source | A build tool with a lock file (uv) is wanted, or `httpx` is replaced by `httpx2` |
+| ADR-18 | **API contract rules** for `/v1/chat`: request id policy, tenant id validation, one error envelope, `latency_ms` = backend time, prompts never logged | Safe defaults now, so later phases add to them instead of changing them | Phase 12/14 (gateway derives the tenant) |
 
 ## Records
 
@@ -39,6 +41,36 @@ Alternatives:
 Consequences: the local cluster runs a Kubernetes minor that leaves upstream support on 2026-10-27. That is acceptable for a local lab as long as it is stated plainly, and it must not be described as "current Kubernetes" in the portfolio after that date. Helm charts and manifests written in later phases must stay compatible with 1.34 and with the version it is later upgraded to.
 
 Revisit when: before 2026-10-27, or as soon as the host reports `cgroup2fs`. Procedure: check `wsl --version` (PowerShell) and `stat -fc %T /sys/fs/cgroup`; if v2, change the k3s image and `KUBECTL_VERSION` together to the same supported minor, then `make doctor && make test && make cluster-reset && make smoke`.
+
+### ADR-17: Python service toolchain
+
+Status: accepted.
+
+Context: Phase 2 needs a small service that runs on a laptop, is easy to test, installs identically on every machine, and can be containerised in Phase 3.
+
+Decision: FastAPI on uvicorn; configuration only from environment variables via pydantic-settings; `src` layout with a `pyproject.toml`; exact versions of every direct and transitive dependency in `requirements.txt` and `requirements-dev.txt`; ruff for lint and format; pytest with coverage (gate at 95 %). The service uses `httpx` for outgoing calls to the model server.
+
+Alternatives: Flask (fewer built-in validation and OpenAPI features), a lock-file tool such as uv or Poetry (better tooling, one more tool to learn and install; revisit when the dependency set grows), `httpx2` in the service.
+
+Consequences: `make app-install` needs only Python 3.12 and network access to PyPI. In the development requirements, `httpx2` is installed as well, because Starlette's test client prefers it and warns when only `httpx` is present (observed with Starlette 1.6.0 on 2026-09-21). On PyPI, `httpx2` lists Tom Christie (the author of httpx and Starlette) as author and `github.com/pydantic/httpx2` as its source (checked 2026-09-21). The service itself keeps the tested `httpx` 0.28.1; moving it to `httpx2` is a separate, deliberate change.
+
+Revisit when: a lock-file tool is worth its cost, or `httpx` stops being maintained.
+
+### ADR-18: API contract rules for /v1/chat
+
+Status: accepted; the tenant rule is temporary.
+
+Decisions:
+
+- **Request id:** taken from the `x-request-id` header only if it matches `[A-Za-z0-9._-]{1,64}`; otherwise a random 32-character id is generated. It is returned in the body and the response header and appears in the application's log lines for chat requests (uvicorn's own access log line does not carry it; structured logs in Phase 3 fix that). A client-supplied id is not trusted blindly, because it could forge log lines or explode a metrics label.
+- **Tenant id:** must match `[a-z0-9][a-z0-9_-]{0,31}` (short, lower-case, low cardinality). In Phase 2 it is taken from the request body and is **not authoritative**: any caller can claim any tenant. From Phase 12/14 the gateway derives the tenant from the API key and rejects a mismatch.
+- **Errors:** one JSON envelope `{"error": {"code", "message", "request_id", "details"?}}` for every error, including 404 and 405. 422 for invalid input, 502 when the backend fails, 504 on timeout, 500 for anything unexpected. Validation details name the field and the rule, never the submitted value.
+- **`latency_ms`:** time spent in the backend call, not the whole HTTP request, so model time and platform overhead can be told apart later.
+- **Prompts are never logged.** Logs carry ids, tenant, model, latency and token counts only. Prompts can contain personal or confidential data.
+
+Consequences: later phases (structured logging, tracing, the gateway) add fields to this contract; they should not have to change it. Not yet covered: request size limits and rate limiting (Phase 12), authentication (Phase 12), structured JSON logs (Phase 3).
+
+Revisit when: Phase 12/14 introduces authenticated tenants.
 
 ## Template for a new record
 

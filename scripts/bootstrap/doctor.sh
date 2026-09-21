@@ -116,6 +116,14 @@ else
   warn "python3 not found (needed from Phase 2)"
 fi
 
+if have python3; then
+  if python3 -c 'import venv, ensurepip' 2>/dev/null; then
+    pass "python3 can create virtualenvs (venv + ensurepip)"
+  else
+    warn "python3 cannot create virtualenvs (needed from Phase 2). Install: sudo apt-get install -y python3-venv"
+  fi
+fi
+
 if have docker; then
   if docker info >/dev/null 2>&1; then
     pass "Docker daemon reachable ($(docker version --format '{{.Server.Version}}' 2>/dev/null))"

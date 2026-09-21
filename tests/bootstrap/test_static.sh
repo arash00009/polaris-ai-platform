@@ -25,7 +25,7 @@ while IFS= read -r f; do
 done < <(find scripts tests -name '*.sh' -type f ! -path 'scripts/lib/*' | sort)
 
 # 3. No CRLF line endings (breaks bash: 'bad interpreter: /usr/bin/env: bash\r')
-crlf="$(grep -rIl $'\r' scripts tests deploy Makefile versions.env 2>/dev/null || true)"
+crlf="$(grep -rIl $'\r' --exclude-dir=.venv --exclude-dir=__pycache__ --exclude-dir='*.egg-info' scripts tests deploy app Makefile versions.env 2>/dev/null || true)"
 if [[ -z "$crlf" ]]; then ok "no CRLF line endings"; else bad "CRLF line endings in: $crlf"; fi
 
 # 4. versions.env
@@ -74,8 +74,15 @@ k3s_min="1.$(k3s_minor_from_image "$(k3s_image_from_config deploy/k3d/cluster.ya
 stale="$(grep -rnE "localhost:(8080|8443)\b" README.md docs scripts deploy 2>/dev/null | grep -v 'docs/troubleshooting.md' || true)"
 if [[ -z "$stale" ]]; then ok "no stale localhost:8080/8443 references (cluster is on $k3s_min, ports from cluster.yaml)"; else bad "stale port references: $stale"; fi
 
-# 10. No obvious secrets or local cluster credentials committed
-if grep -rIEl 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}' . --exclude-dir=.git --exclude=test_static.sh 2>/dev/null | grep -q .; then
+# 10. Python requirements are pinned exactly (== or an include of another requirements file)
+for req in app/ai_service/requirements.txt app/ai_service/requirements-dev.txt; do
+  if [[ ! -f "$req" ]]; then bad "missing $req"; continue; fi
+  loose="$(grep -vE '^\s*(#|$)' "$req" | grep -vE '^-r ' | grep -vE '^[A-Za-z0-9._-]+==[A-Za-z0-9.+!_-]+\s*$' || true)"
+  if [[ -z "$loose" ]]; then ok "exactly pinned: $req"; else bad "not exactly pinned in $req: $loose"; fi
+done
+
+# 11. No obvious secrets or local cluster credentials committed
+if grep -rIEl 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}' . --exclude-dir=.git --exclude-dir=.venv --exclude-dir=__pycache__ --exclude-dir='*.egg-info' --exclude=test_static.sh 2>/dev/null | grep -q .; then
   bad "secret-looking string found in repository"
 else
   ok "no secret-looking strings found"

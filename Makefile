@@ -1,7 +1,12 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
-.PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions
+APP_DIR := app/ai_service
+VENV    := $(APP_DIR)/.venv
+PY      := $(VENV)/bin/python
+
+.PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
+	app-install app-lint app-test app-check app-run
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -35,3 +40,23 @@ smoke: ## End-to-end check: registry -> cluster -> ingress -> host
 
 versions: ## Print the pinned tool versions
 	@grep -vE '^\s*(#|$$)' versions.env
+
+$(PY):
+	@echo "No Python virtualenv yet. Run: make app-install" >&2; exit 1
+
+app-install: ## Create the AI service virtualenv and install the pinned dependencies
+	python3 -m venv $(VENV)
+	$(PY) -m pip install -r $(APP_DIR)/requirements-dev.txt
+	$(PY) -m pip install --no-deps -e $(APP_DIR)
+
+app-lint: $(PY) ## Lint and format-check the AI service (ruff)
+	$(PY) -m ruff check $(APP_DIR)
+	$(PY) -m ruff format --check $(APP_DIR)
+
+app-test: $(PY) ## Run the AI service unit tests with coverage (fails below 95 %)
+	cd $(APP_DIR) && .venv/bin/python -m pytest --cov --cov-fail-under=95
+
+app-check: app-lint app-test ## Lint and test the AI service
+
+app-run: $(PY) ## Run the AI service locally on http://127.0.0.1:8000
+	cd $(APP_DIR) && .venv/bin/python -m uvicorn ai_service.main:create_app --factory --host 127.0.0.1 --port 8000
