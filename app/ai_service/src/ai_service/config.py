@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # Upper bound for one backend call, in seconds. Exceeding it becomes HTTP 504.
     backend_timeout_s: float = Field(default=30.0, gt=0, le=300)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    # "text" is readable in a terminal; "json" (set by the container image) is one JSON object
+    # per line, which log pipelines can parse.
+    log_format: Literal["text", "json"] = "text"
+    # How long GET /readyz waits for the backend to confirm it is ready, in seconds. Kept short
+    # on purpose: a readiness probe that hangs is worse than one that fails fast.
+    ready_timeout_s: float = Field(default=2.0, gt=0, le=30)
 
     # --- MockBackend (LOCAL / DEMO): deterministic answers, no model involved ---
     mock_model_name: str = Field(default="mock-1", min_length=1, max_length=64)
@@ -27,6 +33,9 @@ class Settings(BaseSettings):
     mock_failure_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     # Seed for the failure decisions. Set it to make a failure pattern reproducible.
     mock_seed: int | None = None
+    # Set to false to make the mock report "not ready" on GET /readyz. Used to practise how
+    # a readiness probe removes a pod from a Service (Phase 5) and in failure engineering.
+    mock_ready: bool = True
 
     # --- OpenAICompatBackend: any server that speaks the OpenAI chat-completions API ---
     # Default is Ollama's OpenAI-compatible endpoint on the same host (used from Phase 11).

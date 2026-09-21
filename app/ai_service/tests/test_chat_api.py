@@ -203,6 +203,10 @@ def test_injected_backend_is_used_and_closed_on_shutdown() -> None:
 # ---- logging ---------------------------------------------------------------------------
 
 
+def _record(caplog: pytest.LogCaptureFixture, message: str, logger_name: str) -> logging.LogRecord:
+    return next(r for r in caplog.records if r.name == logger_name and r.getMessage() == message)
+
+
 def test_logs_carry_ids_but_never_the_prompt(
     client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -211,11 +215,13 @@ def test_logs_carry_ids_but_never_the_prompt(
         response = client.post("/v1/chat", json={"tenant_id": "acme", "prompt": private_prompt})
 
     request_id = response.json()["request_id"]
-    text = caplog.text
-    assert f"request_id={request_id}" in text
-    assert "tenant_id=acme" in text
-    assert "model=mock-1" in text
-    assert private_prompt not in text
+    completed = _record(caplog, "chat completed", "ai_service")
+    assert completed.request_id == request_id
+    assert completed.tenant_id == "acme"
+    assert completed.model == "mock-1"
+    # Neither the formatted text nor any attribute of any record may hold the prompt.
+    assert private_prompt not in caplog.text
+    assert private_prompt not in repr([record.__dict__ for record in caplog.records])
 
 
 def test_backend_failures_are_logged_without_the_prompt(caplog: pytest.LogCaptureFixture) -> None:
@@ -226,9 +232,12 @@ def test_backend_failures_are_logged_without_the_prompt(caplog: pytest.LogCaptur
     ):
         client.post("/v1/chat", json={"tenant_id": "acme", "prompt": private_prompt})
 
-    assert "code=backend_error" in caplog.text
-    assert "tenant_id=acme" in caplog.text
+    failed = _record(caplog, "chat failed", "ai_service")
+    assert failed.code == "backend_error"
+    assert failed.tenant_id == "acme"
+    assert failed.reason == "upstream said no"
     assert private_prompt not in caplog.text
+    assert private_prompt not in repr([record.__dict__ for record in caplog.records])
 
 
 def test_concurrent_requests_do_not_share_request_ids() -> None:
@@ -259,4 +268,4 @@ def test_reported_version_matches_the_installed_package(client: TestClient) -> N
     import ai_service
 
     assert client.get("/openapi.json").json()["info"]["version"] == ai_service.__version__
-    assert ai_service.__version__ == "0.2.0"
+    assert ai_service.__version__ == "0.3.0"

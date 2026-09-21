@@ -68,3 +68,53 @@ The six questions: (1) what problem does it solve, (2) why was it chosen, (3) wh
 | 4. Scale | The interface is per-request and stateless. Throughput depends entirely on the implementation behind it. |
 | 5. Security | Backend error messages never contain upstream response bodies or URLs; the API key is a `SecretStr`, is not shown in `repr()` and is not logged. |
 | 6. Cloud | Point `POLARIS_OPENAI_BASE_URL` at a managed or self-hosted inference endpoint. **Status:** `OpenAICompatBackend` is unit-tested against a fake transport only; it has not yet talked to a real model server (Phase 11). |
+
+---
+
+## Phase 3
+
+Status of every row below: **written and checked in the environment where it was written (unit tests, static checks, a simulation of the runtime steps); the image itself has not been built or scanned there.** Rows that depend on a real build are marked *(pending first build)* until the outputs from the target machine exist.
+
+### Container image (multi-stage, non-root)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Packages the service and its exact dependencies into one artifact that runs the same on a laptop, in CI and in Kubernetes. |
+| 2. Why | A multi-stage build keeps compilers, caches and pip out of the runtime image; a fixed numeric non-root user lets Kubernetes verify `runAsNonRoot`; the tag `<version>-<git sha>` says exactly which commit is inside. Decisions in ADR-19. |
+| 3. Failure | A failed build stops before anything is tagged. A container that starts but is unhealthy is caught by `make image-check` (probes, contract, JSON logs, SIGTERM) and by the Docker `HEALTHCHECK`. *(pending first build)* |
+| 4. Scale | The service keeps no state, so replicas are cheap. Image size and start time are measured on the target machine, not assumed. *(pending first build)* |
+| 5. Security | Non-root uid 10001, no package installer at runtime, read-only root filesystem and no capabilities when run with `make image-run`, no secrets in the image (settings come from the environment), `.dockerignore` keeps local state out of the build context. **Not done:** image signing and admission policy (Phase 15); the base image digest is pinned only after `make image-pin` has been run and committed. |
+| 6. Cloud | The same image in ECR, GHCR or ACR, run by EKS, AKS or GKE, with the registry's own scanning and signing. **Not done here.** |
+
+### Health probes (`/healthz`, `/readyz`)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Lets the platform tell "restart this container" (liveness) from "do not send traffic to it yet" (readiness). |
+| 2. Why | Two endpoints because the questions differ: liveness checks only that the process answers; readiness asks the backend. Tying liveness to a slow model server would restart healthy pods (ADR-20). |
+| 3. Failure | `/readyz` answers 503 in the standard error envelope when the backend is not ready or does not answer within `POLARIS_READY_TIMEOUT_S`. `POLARIS_MOCK_READY=false` reproduces that on purpose. |
+| 4. Scale | Both are cheap and stateless. The readiness check against a real model server is a single `GET /models`; whether that is enough is decided in Phase 11. |
+| 5. Security | The probes return a fixed body and never echo backend details. They have no authentication, so they must not be exposed outside the cluster network (Phase 4/12). |
+| 6. Cloud | Kubernetes liveness and readiness probes, or a cloud load balancer health check, pointed at these paths. **Not done here** until Phase 4. |
+
+### Structured logging
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | One parseable JSON object per line, with the request id in every line that concerns a request, so a log pipeline can filter by request, tenant or status without regular expressions. |
+| 2. Why | Standard library only, no new dependency. A field allow-list means a prompt cannot reach the log by accident; text format is kept for the terminal. |
+| 3. Failure | Logging never raises into a request. An unhandled error is logged with its traceback in the `exception` field and the client gets a generic 500 with the request id. |
+| 4. Scale | Lines go to stdout and the container runtime collects them; volume is one access line and one result line per chat request, probes at DEBUG. |
+| 5. Security | Prompts are never logged (tested against every log record, not just the formatted text); the query string is never logged; client-controlled values cannot forge a second line in text format. Error `reason` texts come from backends that never include upstream bodies or URLs. |
+| 6. Cloud | Collected by a node agent (Promtail or the OpenTelemetry Collector, Phase 10) into Loki or a cloud logging service. **Not done here.** |
+
+### Trivy scan and SBOM
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Finds known vulnerabilities in the operating system packages and Python dependencies of the image, and lists what the image contains. |
+| 2. Why | Trivy covers OS and language packages in one tool and writes CycloneDX. It runs as a pinned container on a saved image tar, so nothing is installed on the host and the scanner never gets the Docker socket (ADR-21). |
+| 3. Failure | `make image-scan` fails on a HIGH or CRITICAL finding that has a fix available. A scan that cannot download its database fails loudly; it never reports "clean". *(pending first scan)* |
+| 4. Scale | A scan takes seconds to a few minutes once the database is cached. In CI (Phase 6) the same script runs on every build. |
+| 5. Security | The scanner is part of the supply chain: in March 2026 Trivy releases 0.69.4 to 0.69.6 were malicious. The version is pinned, those versions are refused by `make test`, and the image can be pinned by digest. Cosign verification of the release is recommended and **not done**. A scan is a point-in-time statement about known vulnerabilities, not proof of safety. |
+| 6. Cloud | Registry-side scanning (ECR, ACR, GHCR with Dependabot), admission control that rejects unscanned or unsigned images (Phase 15). **Not done here.** |

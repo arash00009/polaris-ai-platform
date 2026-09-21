@@ -94,3 +94,9 @@ async def test_failure_rate_is_roughly_respected() -> None:
     outcomes = await _outcomes(MockBackend(failure_rate=0.3, seed=1), 2000)
     failure_share = outcomes.count(False) / len(outcomes)
     assert 0.25 < failure_share < 0.35
+
+
+async def test_the_mock_is_ready_by_default_and_can_be_made_not_ready() -> None:
+    await MockBackend().check_ready()  # must not raise
+    with pytest.raises(BackendError, match="not ready"):
+        await MockBackend(ready=False).check_ready()

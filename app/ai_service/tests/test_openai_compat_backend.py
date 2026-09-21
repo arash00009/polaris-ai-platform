@@ -158,3 +158,43 @@ async def test_owned_client_is_closed_but_an_injected_client_is_not() -> None:
     owning = OpenAICompatBackend(base_url="http://x", model="m")
     await owning.aclose()
     assert owning._client.is_closed is True
+
+
+# ---- readiness (GET <base_url>/models) -------------------------------------------------
+
+
+async def test_check_ready_succeeds_when_the_models_endpoint_answers() -> None:
+    backend, seen = _backend(lambda _request: httpx.Response(200, json={"data": []}))
+
+    await backend.check_ready()
+
+    (request,) = seen
+    assert request.method == "GET"
+    assert request.url == "http://upstream.test/v1/models"
+
+
+async def test_check_ready_fails_on_an_http_error_without_leaking_the_body() -> None:
+    backend, _ = _backend(lambda _request: httpx.Response(503, text="secret upstream body"))
+
+    with pytest.raises(BackendError) as caught:
+        await backend.check_ready()
+
+    assert "503" in str(caught.value)
+    assert "secret upstream body" not in str(caught.value)
+
+
+async def test_check_ready_maps_timeouts_and_connection_errors() -> None:
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("slow", request=request)
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("http://upstream.test refused", request=request)
+
+    slow, _ = _backend(timeout)
+    with pytest.raises(BackendTimeout):
+        await slow.check_ready()
+
+    down, _ = _backend(refused)
+    with pytest.raises(BackendError) as caught:
+        await down.check_ready()
+    assert "upstream.test" not in str(caught.value)

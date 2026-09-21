@@ -88,5 +88,48 @@ else
   ok "no secret-looking strings found"
 fi
 
+# 12. Phase 3: pinned values for the image build and the scanner
+if [[ "${PYTHON_BASE_TAG:-}" =~ ^3\.12-slim-[a-z]+$ ]]; then ok "PYTHON_BASE_TAG=$PYTHON_BASE_TAG (Debian release named, no floating tag)"; else bad "PYTHON_BASE_TAG must look like 3.12-slim-<debian codename> (got '${PYTHON_BASE_TAG:-}')"; fi
+for var in PYTHON_BASE_DIGEST TRIVY_IMAGE_DIGEST; do
+  val="${!var-unset}"
+  if [[ "$val" == "unset" ]]; then bad "$var is missing from versions.env (it may be empty, but it must exist)"
+  elif [[ -z "$val" || "$val" =~ ^sha256:[0-9a-f]{64}$ ]]; then ok "$var is empty or a sha256 digest"
+  else bad "$var must be empty or sha256:<64 hex characters> (got '$val')"; fi
+done
+if [[ "${TRIVY_VERSION:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "TRIVY_VERSION=$TRIVY_VERSION"; else bad "TRIVY_VERSION must be X.Y.Z without a leading v (got '${TRIVY_VERSION:-}')"; fi
+case "${TRIVY_VERSION:-}" in
+  0.69.4|0.69.5|0.69.6) bad "TRIVY_VERSION=$TRIVY_VERSION is a known malicious release (GHSA-69fq-xp46-6x23)" ;;
+  *) ok "TRIVY_VERSION is not one of the known malicious releases (0.69.4, 0.69.5, 0.69.6)" ;;
+esac
+
+# 13. Dockerfile: the default base image matches versions.env, no floating tags
+DF="app/ai_service/Dockerfile"
+if [[ ! -f "$DF" ]]; then
+  bad "missing $DF"
+else
+  df_base="$(sed -n 's/^ARG PYTHON_IMAGE=//p' "$DF" | head -n1)"
+  if [[ "$df_base" == "python:${PYTHON_BASE_TAG:-}" ]]; then ok "Dockerfile default base image matches versions.env ($df_base)"; else bad "Dockerfile ARG PYTHON_IMAGE ('$df_base') must equal python:PYTHON_BASE_TAG from versions.env ('python:${PYTHON_BASE_TAG:-}')"; fi
+
+  bad_from="$(grep -E '^FROM ' "$DF" | grep -vE '^FROM \$\{PYTHON_IMAGE\}( AS [a-z]+)?$' || true)"
+  if [[ -z "$bad_from" ]]; then ok "every FROM in the Dockerfile uses the pinned PYTHON_IMAGE argument"; else bad "FROM lines that do not use \${PYTHON_IMAGE}: $bad_from"; fi
+
+  if grep -rnE ':latest\b' "$DF" scripts/build/image.sh >/dev/null 2>&1; then bad "a ':latest' tag is used in the Dockerfile or the image script"; else ok "no ':latest' tag in the Dockerfile or the image script"; fi
+
+  last_user="$(grep -E '^USER ' "$DF" | tail -n1 | awk '{print $2}')"
+  if [[ "$last_user" =~ ^[0-9]+(:[0-9]+)?$ && "${last_user%%:*}" != "0" ]]; then ok "the image runs as a numeric non-root user (USER $last_user)"; else bad "the last USER in the Dockerfile must be a numeric non-root id (got '$last_user')"; fi
+
+  if grep -qE '^HEALTHCHECK ' "$DF"; then ok "the Dockerfile defines a HEALTHCHECK"; else bad "the Dockerfile has no HEALTHCHECK"; fi
+
+  if grep -nE 'curl[^|]*\|[[:space:]]*(ba)?sh|^ADD https?://|\bsudo\b|--privileged' "$DF" >/dev/null 2>&1; then bad "the Dockerfile pipes a download into a shell, uses ADD from a URL, sudo or --privileged"; else ok "no curl|sh, remote ADD, sudo or --privileged in the Dockerfile"; fi
+fi
+
+# 14. .dockerignore keeps local state and secrets out of the build context
+DI="app/ai_service/.dockerignore"
+if [[ -f "$DI" ]] && grep -qxF '.venv' "$DI" && grep -qxF 'tests' "$DI" && grep -qxF '.env' "$DI"; then
+  ok ".dockerignore excludes .venv, tests and .env"
+else
+  bad "$DI must exist and exclude .venv, tests and .env"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

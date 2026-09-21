@@ -36,3 +36,6 @@ trivy-results.*
 .terraform/
 *.tfstate
 *.tfstate.*
+
+# Scanner reports, SBOMs, saved image tarballs and the vulnerability database cache (make image-scan)
+artifacts/

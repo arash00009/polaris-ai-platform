@@ -68,12 +68,18 @@ class MockBackend(ModelBackend):
         latency_ms: int = 0,
         failure_rate: float = 0.0,
         seed: int | None = None,
+        ready: bool = True,
     ) -> None:
         self._model = model
+        self._ready = ready
         self._latency_ms = latency_ms
         self._failure_rate = failure_rate
         # A private generator: seeding it never touches global random state.
         self._rng = random.Random(seed)  # noqa: S311 - failure injection, not cryptography
+
+    async def check_ready(self) -> None:
+        if not self._ready:
+            raise BackendError("mock backend: not ready")
 
     async def generate(self, prompt: str) -> BackendResult:
         if self._latency_ms:

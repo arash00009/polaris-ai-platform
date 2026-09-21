@@ -1,6 +1,9 @@
-"""The FastAPI application: POST /v1/chat in front of a ModelBackend.
+"""The FastAPI application: POST /v1/chat in front of a ModelBackend, plus two probes.
 
-Run locally:  uvicorn ai_service.main:create_app --factory --host 127.0.0.1 --port 8000
+Run locally (see `make app-run`):
+  uvicorn ai_service.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log
+The service writes its own access log line per request, which carries the request id, so
+uvicorn's access log is switched off.
 """
 
 import asyncio
@@ -19,14 +22,25 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ai_service import __version__
 from ai_service.backends import BackendError, BackendTimeout, ModelBackend, build_backend
 from ai_service.config import Settings
-from ai_service.schemas import ChatRequest, ChatResponse, ErrorBody, ErrorDetail, ErrorResponse
+from ai_service.logging_setup import configure_logging
+from ai_service.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ErrorBody,
+    ErrorDetail,
+    ErrorResponse,
+    StatusResponse,
+)
 
 logger = logging.getLogger("ai_service")
+access_logger = logging.getLogger("ai_service.access")
 
 REQUEST_ID_HEADER = "x-request-id"
 # A client-supplied request id is only trusted if it is short and made of harmless characters.
 # Otherwise it could inject fake lines into logs or blow up the cardinality of a label.
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# Probes hit these every few seconds; their access lines would drown everything else.
+_PROBE_PATHS = frozenset({"/healthz", "/readyz"})
 
 
 class ApiError(Exception):
@@ -58,17 +72,10 @@ def _error_response(
     return JSONResponse(status_code=status_code, content=body.model_dump(exclude_none=True))
 
 
-def _configure_logging(level: str) -> None:
-    # No-op if the process already configured logging (uvicorn, pytest). Structured JSON
-    # logging replaces this simple format in Phase 3.
-    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    logger.setLevel(level)
-
-
 def create_app(settings: Settings | None = None, backend: ModelBackend | None = None) -> FastAPI:
     """Build the app. ``settings`` and ``backend`` can be injected, which keeps tests simple."""
     settings = settings or Settings()
-    _configure_logging(settings.log_level)
+    configure_logging(settings.log_level, settings.log_format)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -88,9 +95,27 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
         supplied = request.headers.get(REQUEST_ID_HEADER, "")
         request_id = supplied if _SAFE_REQUEST_ID.fullmatch(supplied) else uuid.uuid4().hex
         request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        return response
+        started = time.perf_counter()
+        status = 500  # what the client gets if the handler below raises past this middleware
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers[REQUEST_ID_HEADER] = request_id
+            return response
+        finally:
+            # Path only, never the query string: it can carry data the caller did not mean to
+            # log. Probe requests are logged at DEBUG so they do not flood the log.
+            access_logger.log(
+                logging.DEBUG if request.url.path in _PROBE_PATHS else logging.INFO,
+                "http request",
+                extra={
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                },
+            )
 
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
@@ -123,7 +148,7 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
 
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
-        logger.exception("unhandled error request_id=%s", _request_id_of(request))
+        logger.exception("unhandled error", extra={"request_id": _request_id_of(request)})
         return _error_response(request, 500, "internal_error", "Internal server error.")
 
     @app.post(
@@ -144,32 +169,39 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
         except (TimeoutError, BackendTimeout) as exc:
             # The prompt is deliberately never logged: it can hold personal data.
             logger.warning(
-                "chat failed request_id=%s tenant_id=%s code=backend_timeout",
-                request_id,
-                body.tenant_id,
+                "chat failed",
+                extra={
+                    "request_id": request_id,
+                    "tenant_id": body.tenant_id,
+                    "code": "backend_timeout",
+                },
             )
             raise ApiError(
                 504, "backend_timeout", "The model backend did not answer in time."
             ) from exc
         except BackendError as exc:
             logger.warning(
-                "chat failed request_id=%s tenant_id=%s code=backend_error reason=%s",
-                request_id,
-                body.tenant_id,
-                exc,
+                "chat failed",
+                extra={
+                    "request_id": request_id,
+                    "tenant_id": body.tenant_id,
+                    "code": "backend_error",
+                    "reason": str(exc),
+                },
             )
             raise ApiError(502, "backend_error", "The model backend failed.") from exc
 
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
         logger.info(
-            "chat completed request_id=%s tenant_id=%s model=%s latency_ms=%s "
-            "prompt_tokens=%s completion_tokens=%s",
-            request_id,
-            body.tenant_id,
-            result.model,
-            latency_ms,
-            result.prompt_tokens,
-            result.completion_tokens,
+            "chat completed",
+            extra={
+                "request_id": request_id,
+                "tenant_id": body.tenant_id,
+                "model": result.model,
+                "latency_ms": latency_ms,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+            },
         )
         return ChatResponse(
             response=result.text,
@@ -177,5 +209,37 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             request_id=request_id,
             latency_ms=latency_ms,
         )
+
+    @app.get("/healthz", response_model=StatusResponse, tags=["probes"])
+    async def healthz() -> StatusResponse:
+        """Liveness: the process is running and can answer HTTP.
+
+        It checks nothing else on purpose. If liveness depended on the model backend, a slow
+        model server would make Kubernetes restart healthy pods, which only adds load.
+        """
+        return StatusResponse(status="ok")
+
+    @app.get(
+        "/readyz",
+        response_model=StatusResponse,
+        tags=["probes"],
+        responses={503: {"model": ErrorResponse, "description": "The backend is not ready"}},
+    )
+    async def readyz(request: Request) -> StatusResponse:
+        """Readiness: the service can take traffic now, meaning its backend is reachable."""
+        try:
+            async with asyncio.timeout(settings.ready_timeout_s):
+                await request.app.state.backend.check_ready()
+        except (TimeoutError, BackendError) as exc:
+            logger.warning(
+                "readiness check failed",
+                extra={
+                    "request_id": _request_id_of(request),
+                    "code": "not_ready",
+                    "reason": str(exc) or "readiness check timed out",
+                },
+            )
+            raise ApiError(503, "not_ready", "The model backend is not ready.") from exc
+        return StatusResponse(status="ready")
 
     return app

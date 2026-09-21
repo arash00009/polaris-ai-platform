@@ -29,4 +29,5 @@ def build_backend(settings: Settings) -> ModelBackend:
         latency_ms=settings.mock_latency_ms,
         failure_rate=settings.mock_failure_rate,
         seed=settings.mock_seed,
+        ready=settings.mock_ready,
     )

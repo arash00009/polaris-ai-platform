@@ -31,5 +31,12 @@ class ModelBackend(ABC):
     async def generate(self, prompt: str) -> BackendResult:
         """Return an answer for ``prompt`` or raise BackendError / BackendTimeout."""
 
+    async def check_ready(self) -> None:  # noqa: B027 - intentionally optional, not abstract
+        """Raise BackendError if the backend cannot serve requests right now.
+
+        Used by GET /readyz. It must be cheap and must not run a real generation. The default
+        says "ready", which is right for a backend with nothing to wait for.
+        """
+
     async def aclose(self) -> None:  # noqa: B027 - intentionally optional, not abstract
         """Release resources (connections). Called once when the service shuts down."""

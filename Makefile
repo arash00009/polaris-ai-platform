@@ -6,7 +6,8 @@ VENV    := $(APP_DIR)/.venv
 PY      := $(VENV)/bin/python
 
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
-	app-install app-lint app-test app-check app-run
+	app-install app-lint app-test app-check app-run \
+	image-info image-pin image-build image-run image-check image-push image-scan image-sbom
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -18,7 +19,7 @@ doctor: ## Check that this machine can run the platform
 	./scripts/bootstrap/doctor.sh
 
 lint: ## Lint all shell scripts with shellcheck
-	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh tests/bootstrap/*.sh
+	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh tests/bootstrap/*.sh
 
 test: ## Run static tests (no Docker or cluster needed)
 	./tests/bootstrap/test_static.sh
@@ -59,4 +60,28 @@ app-test: $(PY) ## Run the AI service unit tests with coverage (fails below 95 %
 app-check: app-lint app-test ## Lint and test the AI service
 
 app-run: $(PY) ## Run the AI service locally on http://127.0.0.1:8000
-	cd $(APP_DIR) && .venv/bin/python -m uvicorn ai_service.main:create_app --factory --host 127.0.0.1 --port 8000
+	cd $(APP_DIR) && .venv/bin/python -m uvicorn ai_service.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log
+
+image-info: ## Show the image tags, base image and scanner that would be used
+	./scripts/build/image.sh info
+
+image-pin: ## Print the current digests of the base image and scanner for versions.env
+	./scripts/build/image.sh pin
+
+image-build: ## Build the AI service container image (tags: <version>-<git sha> and <version>)
+	./scripts/build/image.sh build
+
+image-run: ## Run the image locally, hardened, on http://127.0.0.1:8000 (POLARIS_* variables pass through)
+	./scripts/build/image.sh run
+
+image-check: ## Start the image and verify user, probes, contract, JSON logs and clean shutdown
+	./scripts/build/image.sh check
+
+image-push: ## Push the image to the local registry (localhost:5000)
+	./scripts/build/image.sh push
+
+image-scan: ## Scan the image for vulnerabilities with Trivy (fails on fixable HIGH/CRITICAL)
+	./scripts/build/image.sh scan
+
+image-sbom: ## Write a CycloneDX software bill of materials for the image to artifacts/
+	./scripts/build/image.sh sbom

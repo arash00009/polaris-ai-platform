@@ -750,7 +750,7 @@ Proposed decisions. Each one is revisited when its trigger condition occurs.
 | ADR-11 | **Environments = namespaces** in one cluster, one shared model server | 16 GB constraint | 32 GB+ machine |
 | ADR-12 | **Two verification loops**: ephemeral k3d in CI (pre-merge) + Argo Rollouts analysis (post-deploy in the local cluster) | GitHub runners cannot reach a laptop cluster; avoids tunnels and self-hosted runners on a public repo | You add a cloud test cluster |
 
-Decisions made during implementation (ADR-13 to ADR-18: Docker Engine in WSL2, pinned tool versions, Helm 4, the temporary Kubernetes 1.34 pin caused by cgroup v1, the Python service toolchain and the `/v1/chat` API contract rules) are recorded in [adr/README.md](adr/README.md).
+Decisions made during implementation (ADR-13 to ADR-21: Docker Engine in WSL2, pinned tool versions, Helm 4, the temporary Kubernetes 1.34 pin caused by cgroup v1, the Python service toolchain, the `/v1/chat` API contract rules, the container image, probes and structured logging, and the scanner and SBOM) are recorded in [adr/README.md](adr/README.md).
 
 **Decisions intentionally left open until their phase:** exact model and quantisation (Phase 11); final gateway technology and streaming support (Phase 12); OpenCost-only vs OpenCost + custom model depth (Phase 13); MLflow vs Git manifest (Phase 16); Langfuse vs Phoenix vs custom evaluation view (Phase 17).
 

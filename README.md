@@ -15,7 +15,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 0 | Architecture and roadmap | Done — [docs/architecture.md](docs/architecture.md) |
 | 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — cluster and smoke test verified on the target machine; final re-run of `make doctor`, `make test` and `make smoke` after the latest fixes pending |
 | 2 | AI service (FastAPI, swappable model backend) | Done — verified on the target machine (2026-09-21): 87 unit tests at 99 % coverage, and the running service answered 200, 422, 404, 502 and 504 as designed. The real model backend is only tested against a fake transport until Phase 11 |
-| 3 | Containerization, Trivy, SBOM | Planned |
+| 3 | Containerization, Trivy, SBOM | In progress — implemented, 125 unit tests and 41 static checks pass in the environment where it was written; the image has not been built, scanned or run on the target machine yet |
 | 4–5 | Kubernetes manifests, Helm chart, multi-environment values | Planned |
 | 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
 | 8 | GitOps with Argo CD (separate configuration repository) | Planned |
@@ -42,7 +42,11 @@ make smoke           # registry -> cluster -> ingress -> host, end to end
 
 make app-install     # Phase 2: AI service virtualenv with pinned dependencies
 make app-check       # lint + unit tests
-make app-run         # http://127.0.0.1:8000, POST /v1/chat
+make app-run         # http://127.0.0.1:8000, POST /v1/chat, GET /healthz, GET /readyz
+
+make image-build     # Phase 3: container image, tagged <version>-<git sha>
+make image-check     # start it and verify user, probes, contract, JSON logs, shutdown
+make image-scan      # Trivy scan; make image-sbom writes the SBOM
 ```
 
 `make help` lists every target.
@@ -54,19 +58,21 @@ make app-run         # http://127.0.0.1:8000, POST /v1/chat
 ├── Makefile                 # entry point for every local task
 ├── versions.env             # pinned tool versions (single source of truth)
 ├── app/
-│   └── ai_service/          # FastAPI service, ModelBackend interface, unit tests
+│   └── ai_service/          # FastAPI service, ModelBackend interface, unit tests, Dockerfile
 ├── deploy/
 │   ├── k3d/cluster.yaml     # local cluster definition (k3s image pinned here)
 │   └── k8s-smoke/           # throwaway workload used by `make smoke`
 ├── scripts/
 │   ├── lib/common.sh        # shared shell helpers
-│   └── bootstrap/           # install-tools, doctor, cluster, smoke-test
+│   ├── bootstrap/           # install-tools, doctor, cluster, smoke-test
+│   └── build/image.sh       # image build, check, push, scan and SBOM (Phase 3)
 ├── tests/bootstrap/         # static tests for the scripts and configuration
 └── docs/
     ├── architecture.md      # design, diagrams, technology choices, roadmap
     ├── deployment.md        # how to reproduce the local environment
     ├── troubleshooting.md   # real errors and fixes, added as they are encountered
     ├── component-qa.md      # the six employer questions for every component
+    ├── security/image-scan.md  # image scan results and accepted findings
     └── adr/README.md        # architecture decision records
 ```
 

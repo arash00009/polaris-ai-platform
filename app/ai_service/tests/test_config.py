@@ -13,6 +13,9 @@ def test_defaults_describe_a_quiet_local_mock() -> None:
     assert settings.mock_failure_rate == 0.0
     assert settings.mock_seed is None
     assert settings.backend_timeout_s == 30.0
+    assert settings.log_format == "text"
+    assert settings.ready_timeout_s == 2.0
+    assert settings.mock_ready is True
 
 
 def test_values_come_from_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -27,6 +30,20 @@ def test_values_come_from_environment_variables(monkeypatch: pytest.MonkeyPatch)
     assert settings.mock_failure_rate == 0.25
     assert settings.mock_seed == 42
     assert settings.log_level == "WARNING"
+
+
+def test_container_related_values_come_from_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLARIS_LOG_FORMAT", "json")
+    monkeypatch.setenv("POLARIS_READY_TIMEOUT_S", "0.5")
+    monkeypatch.setenv("POLARIS_MOCK_READY", "false")
+
+    settings = Settings()
+
+    assert settings.log_format == "json"
+    assert settings.ready_timeout_s == 0.5
+    assert settings.mock_ready is False
 
 
 def test_unrelated_environment_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,6 +63,9 @@ def test_unrelated_environment_variables_are_ignored(monkeypatch: pytest.MonkeyP
         ("backend_timeout_s", 301),
         ("backend", "gpt"),
         ("log_level", "LOUD"),
+        ("log_format", "xml"),
+        ("ready_timeout_s", 0),
+        ("ready_timeout_s", 31),
     ],
 )
 def test_out_of_range_values_are_rejected(name: str, value: object) -> None:

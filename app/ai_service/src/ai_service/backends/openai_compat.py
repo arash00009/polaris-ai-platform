@@ -65,6 +65,20 @@ class OpenAICompatBackend(ModelBackend):
             completion_tokens=completion_tokens if isinstance(completion_tokens, int) else None,
         )
 
+    async def check_ready(self) -> None:
+        # Ollama, vLLM and other OpenAI-compatible servers answer GET <base>/models. A 200 means
+        # the server is up; it does not prove that the configured model is loaded. Phase 11
+        # may tighten this once it runs against a real server. Messages carry no URL or body.
+        try:
+            response = await self._client.get("models")
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise BackendTimeout("model backend timed out") from exc
+        except httpx.HTTPStatusError as exc:
+            raise BackendError(f"model backend returned HTTP {exc.response.status_code}") from exc
+        except httpx.RequestError as exc:
+            raise BackendError("model backend unreachable") from exc
+
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()

@@ -189,19 +189,49 @@ curl -s -X POST http://127.0.0.1:8000/v1/chat \
 | `POLARIS_BACKEND` | `mock` | `mock` or `openai_compat` |
 | `POLARIS_BACKEND_TIMEOUT_S` | `30` | Total time allowed for one backend call; exceeded means HTTP 504 |
 | `POLARIS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `POLARIS_LOG_FORMAT` | `text` | `text` for a terminal, `json` for one JSON object per line (the container image sets `json`) |
+| `POLARIS_READY_TIMEOUT_S` | `2` | How long `GET /readyz` waits for the backend before answering 503 |
 | `POLARIS_MOCK_MODEL_NAME` | `mock-1` | Model name reported by the mock |
 | `POLARIS_MOCK_LATENCY_MS` | `0` | Simulated processing time |
 | `POLARIS_MOCK_FAILURE_RATE` | `0` | Fraction (0 to 1) of calls that fail on purpose |
 | `POLARIS_MOCK_SEED` | unset | Makes the failure pattern reproducible |
+| `POLARIS_MOCK_READY` | `true` | Set to `false` to make the mock report "not ready" on `/readyz` |
 | `POLARIS_OPENAI_BASE_URL` | `http://localhost:11434/v1` | Server that speaks the OpenAI chat-completions API |
 | `POLARIS_OPENAI_MODEL` | unset | Required when `POLARIS_BACKEND=openai_compat` |
 | `POLARIS_OPENAI_API_KEY` | unset | Optional bearer token; never logged |
 
 Example: `POLARIS_MOCK_LATENCY_MS=200 POLARIS_MOCK_FAILURE_RATE=0.2 make app-run`.
 
+**Probes** (Phase 3): `GET /healthz` answers `{"status":"ok"}` whenever the process runs (liveness); `GET /readyz` answers `{"status":"ready"}` when the backend is ready and 503 otherwise (readiness). Try `POLARIS_MOCK_READY=false make app-run` and call both.
+
 **Dependencies.** `app/ai_service/requirements.txt` (runtime) and `requirements-dev.txt` (tests, lint) pin exact versions, including transitive dependencies, so every machine installs the same set. `pyproject.toml` lists only the direct dependencies. To upgrade deliberately: create a scratch virtualenv, install the direct dependencies unpinned, run `pip freeze`, review the diff, update both files, then run `make app-check`. `make test` fails if any line in the requirements files is not pinned with `==`.
 
-## 9. Run profiles (memory budget)
+## 9. Container image (Phase 3)
+
+The image is built from `app/ai_service/Dockerfile` by `scripts/build/image.sh`, through make targets. Docker must be running (`make doctor`). The first build downloads the base image from Docker Hub and the Python packages from PyPI.
+
+```bash
+make image-info      # tags, base image and scanner that would be used
+make image-pin       # once: prints PYTHON_BASE_DIGEST= and TRIVY_IMAGE_DIGEST= lines; paste them into versions.env and commit
+make image-build     # builds <registry>/polaris/ai-service:<version>-<git sha> and :<version>
+make image-check     # starts the image and verifies: non-root, /healthz, /readyz, the /v1/chat contract, JSON logs, HEALTHCHECK, SIGTERM
+make image-run       # runs it hardened on http://127.0.0.1:8000 (Ctrl+C to stop)
+make image-push      # pushes both tags to the local registry (needs the cluster: make cluster-up)
+make image-scan      # Trivy scan of the image; fails on HIGH/CRITICAL findings that have a fix
+make image-sbom      # CycloneDX SBOM in artifacts/
+```
+
+**Tags.** `<version>-<12-character git sha>` is immutable: deploy by this one. A `-dirty` suffix means the working tree had uncommitted changes. `<version>` moves with every build of that version. There is no `latest`. Build from a clean tree (commit first) to get a tag that names a real commit.
+
+**Configuration** works as for the virtualenv: any `POLARIS_*` variable exported in your shell is passed into the container by `make image-run`, for example `POLARIS_MOCK_FAILURE_RATE=0.3 make image-run`. The image itself only sets `POLARIS_LOG_FORMAT=json`.
+
+**Run restrictions.** `make image-run` and `make image-check` run the container with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a 256 MB memory limit and a process limit. They are the restrictions the Kubernetes manifests apply in Phase 4.
+
+**Digest pins.** Until `PYTHON_BASE_DIGEST` is set, the base image is a moving tag: the build works, but two builds a month apart can differ, and `make image-build` warns about it. After `make image-pin`, pinned builds are reproducible for the base layer. Bumping the pin is a deliberate commit, followed by `make image-check` and `make image-scan`.
+
+**Scanner and SBOM.** Trivy runs as a container on a saved copy of the image (`docker save`), without the Docker socket. Reports and SBOMs land in `artifacts/` (git-ignored); the first scan downloads the vulnerability database (hundreds of MB) into `artifacts/trivy-cache`. Findings that cannot be fixed yet are recorded in `docs/security/image-scan.md`.
+
+## 10. Run profiles (memory budget)
 
 Introduced progressively as components are added. Estimates only; measured values replace them in Phases 9 and 11.
 
@@ -211,7 +241,7 @@ Introduced progressively as components are added. Estimates only; measured value
 | `obs` | core + observability stack | 4–6 GB |
 | `full` | obs + delivery tooling + model server + FinOps | 7–10 GB |
 
-## 10. Teardown
+## 11. Teardown
 
 ```bash
 make cluster-down    # deletes the cluster and the registry container
