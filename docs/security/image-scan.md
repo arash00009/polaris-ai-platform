@@ -60,3 +60,5 @@ The record of what the vulnerability scanner found in the AI service image, and 
 - MEDIUM (49), LOW (57) and UNKNOWN (2) findings are counted, **not reviewed**.
 - SBOM: `artifacts/sbom-0.3.0-ad9cae81814f.cdx.json`, CycloneDX 1.7, 107 components. Not committed (`artifacts/` is git-ignored).
 - Not done: the Trivy release and the image are not signature-verified or signed (cosign, Phase 15).
+
+Note: on 2026-09-21 the local commit history was rewritten (author email only; file contents unchanged). The image 0.3.0-ad9cae81814f above was built from commit ad9cae8, which is 8c4cab9 after the rewrite; the old hash no longer exists in the repository. Rebuild with make image-build to get a tag that matches the current history.
