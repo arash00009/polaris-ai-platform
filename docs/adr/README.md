@@ -77,7 +77,7 @@ Revisit when: Phase 12/14 introduces authenticated tenants.
 
 ### ADR-19: Container image for the AI service
 
-Status: accepted. Written and statically checked; built for the first time on the target machine (see the Phase 3 guide).
+Status: accepted. Built, checked, pushed and run on the target machine on 2026-09-21 (see the Phase 3 guide and `docs/security/image-scan.md`).
 
 Context: Phase 3 turns the service into something Kubernetes can run (Phase 4). The image must be small, must not run as root, must be reproducible, and must say which source revision it was built from.
 
@@ -92,7 +92,7 @@ Decision:
 
 Alternatives: distroless or a hardened vendor base (smaller attack surface, no shell, harder to debug; worth evaluating in Phase 15 once there is something to compare against); Alpine (musl libc causes wheel and behaviour differences for little gain here); the floating `python:3.12-slim` tag (silent changes); buildpacks (less to learn from).
 
-Consequences: `docker exec ... pip install` does not work, by design. The image size and vulnerability count are measured on the target machine, not assumed. The first `make image-build` on a fresh machine needs Docker Hub and PyPI.
+Consequences: `docker exec ... pip install` does not work, by design. Measured on the target machine on 2026-09-21: 134 MB, a 72.9 s cold build, and 44 HIGH findings, all in Debian OS packages with no fix available in trixie (`docs/security/image-scan.md`). The first `make image-build` on a fresh machine needs Docker Hub and PyPI.
 
 Revisit when: the base image digest is bumped (a regular, deliberate change), Python 3.13 becomes the target, or Phase 15 compares a distroless base.
 
@@ -118,13 +118,13 @@ Revisit when: Phase 10 adds trace and span ids; Phase 11 runs against a real mod
 
 ### ADR-21: Vulnerability scanner and SBOM
 
-Status: accepted. Not yet run on the target machine.
+Status: accepted. Run on the target machine on 2026-09-21 (scan, SBOM); results in `docs/security/image-scan.md`.
 
 Context: an image that is never scanned has unknown vulnerabilities, not none. In March 2026 the scanner itself was the attack: Trivy releases v0.69.4, v0.69.5 and v0.69.6 were malicious builds, and the `trivy-action` and `setup-trivy` tags were force-pushed to malicious commits (GitHub advisory GHSA-69fq-xp46-6x23; v0.69.2 and v0.69.3 are listed there as safe). A scanner is part of the supply chain.
 
 Decision:
 
-- **Trivy, version 0.74.0**, chosen because it is the latest release on the project's releases page as checked on 2026-09-21 (published 2026-08-14), which is after that incident. The version is pinned in `versions.env`; `make test` refuses 0.69.4, 0.69.5 and 0.69.6. `make image-pin` prints the image digest so it can be pinned too. That the `ghcr.io/aquasecurity/trivy:0.74.0` tag exists in exactly this form was not checked against the registry and is confirmed by the first `make image-scan`.
+- **Trivy, version 0.74.0**, chosen because it is the latest release on the project's releases page as checked on 2026-09-21 (published 2026-08-14), which is after that incident. The version is pinned in `versions.env`; `make test` refuses 0.69.4, 0.69.5 and 0.69.6. `make image-pin` prints the image digest so it can be pinned too. The `ghcr.io/aquasecurity/trivy:0.74.0` tag was pulled successfully on 2026-09-21 and its digest is pinned in `versions.env`. The release was not signature-verified (cosign); that is not done.
 - **Run as a container, on a tar file.** The image is exported with `docker save` and scanned with `--input`. The scanner container is *not* given the Docker socket (access to it is root-equivalent on the host) and runs as the calling user, so files in `artifacts/` are yours.
 - **Gate.** `make image-scan` fails when a HIGH or CRITICAL finding has a fix available. Findings without a fix do not fail the run but must be written down in `docs/security/image-scan.md` with the reason they are accepted for now. This matches the policy sketched in the architecture document ("Critical/High vulnerability with a fix available").
 - **SBOM.** `make image-sbom` writes a CycloneDX file to `artifacts/`. Reports and SBOMs are build artifacts and are not committed (`artifacts/` is git-ignored); Phase 6 attaches them to the CI run.

@@ -15,7 +15,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 0 | Architecture and roadmap | Done — [docs/architecture.md](docs/architecture.md) |
 | 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — cluster and smoke test verified on the target machine; final re-run of `make doctor`, `make test` and `make smoke` after the latest fixes pending |
 | 2 | AI service (FastAPI, swappable model backend) | Done — verified on the target machine (2026-09-21): 87 unit tests at 99 % coverage, and the running service answered 200, 422, 404, 502 and 504 as designed. The real model backend is only tested against a fake transport until Phase 11 |
-| 3 | Containerization, Trivy, SBOM | In progress — implemented, 125 unit tests and 41 static checks pass in the environment where it was written; the image has not been built, scanned or run on the target machine yet |
+| 3 | Containerization, Trivy, SBOM | Done (verified 2026-09-21) — 125 unit tests and 41 static checks pass; the 134 MB non-root image was built, checked (9/9), pushed to the local registry, scanned (0 CRITICAL, 44 HIGH, none with a fix, all recorded in `docs/security/image-scan.md`) and an SBOM was generated. Not done: image signing, review of MEDIUM/LOW findings |
 | 4–5 | Kubernetes manifests, Helm chart, multi-environment values | Planned |
 | 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
 | 8 | GitOps with Argo CD (separate configuration repository) | Planned |

@@ -73,7 +73,7 @@ The six questions: (1) what problem does it solve, (2) why was it chosen, (3) wh
 
 ## Phase 3
 
-Status of every row below: **written and checked in the environment where it was written (unit tests, static checks, a simulation of the runtime steps); the image itself has not been built or scanned there.** Rows that depend on a real build are marked *(pending first build)* until the outputs from the target machine exist.
+Status of every row below: **built, run, pushed, scanned and SBOM-generated on the target machine on 2026-09-21** (Docker 29.7.2, WSL2), after the unit tests and static checks passed. Measured facts are stated where they exist. Still not done: image signing, cosign verification of Trivy, review of MEDIUM/LOW findings, and anything that needs Kubernetes (Phase 4).
 
 ### Container image (multi-stage, non-root)
 
@@ -81,9 +81,9 @@ Status of every row below: **written and checked in the environment where it was
 |----------|--------|
 | 1. Problem | Packages the service and its exact dependencies into one artifact that runs the same on a laptop, in CI and in Kubernetes. |
 | 2. Why | A multi-stage build keeps compilers, caches and pip out of the runtime image; a fixed numeric non-root user lets Kubernetes verify `runAsNonRoot`; the tag `<version>-<git sha>` says exactly which commit is inside. Decisions in ADR-19. |
-| 3. Failure | A failed build stops before anything is tagged. A container that starts but is unhealthy is caught by `make image-check` (probes, contract, JSON logs, SIGTERM) and by the Docker `HEALTHCHECK`. *(pending first build)* |
-| 4. Scale | The service keeps no state, so replicas are cheap. Image size and start time are measured on the target machine, not assumed. *(pending first build)* |
-| 5. Security | Non-root uid 10001, no package installer at runtime, read-only root filesystem and no capabilities when run with `make image-run`, no secrets in the image (settings come from the environment), `.dockerignore` keeps local state out of the build context. **Not done:** image signing and admission policy (Phase 15); the base image digest is pinned only after `make image-pin` has been run and committed. |
+| 3. Failure | A failed build stops before anything is tagged. A container that starts but is unhealthy is caught by `make image-check` (probes, contract, JSON logs, SIGTERM) and by the Docker `HEALTHCHECK`. On 2026-09-21 the first build passed all 9 checks in `make image-check`, including SIGTERM (exit code 0, `Application shutdown complete` logged). A build failure was not provoked, so that part is by design, not observed. |
+| 4. Scale | The service keeps no state, so replicas are cheap. Measured on the target machine: a first cold build took 72.9 s and the image is 134 MB (140,925,206 bytes) on a digest-pinned `python:3.12-slim-trixie`. Start time was not measured. |
+| 5. Security | Non-root uid 10001, no package installer at runtime, read-only root filesystem and no capabilities when run with `make image-run`, no secrets in the image (settings come from the environment), `.dockerignore` keeps local state out of the build context. **Not done:** image signing and admission policy (Phase 15); the base image digest is pinned in `versions.env` (2026-09-21) and must be bumped deliberately with `make image-pin`. |
 | 6. Cloud | The same image in ECR, GHCR or ACR, run by EKS, AKS or GKE, with the registry's own scanning and signing. **Not done here.** |
 
 ### Health probes (`/healthz`, `/readyz`)
@@ -114,7 +114,7 @@ Status of every row below: **written and checked in the environment where it was
 |----------|--------|
 | 1. Problem | Finds known vulnerabilities in the operating system packages and Python dependencies of the image, and lists what the image contains. |
 | 2. Why | Trivy covers OS and language packages in one tool and writes CycloneDX. It runs as a pinned container on a saved image tar, so nothing is installed on the host and the scanner never gets the Docker socket (ADR-21). |
-| 3. Failure | `make image-scan` fails on a HIGH or CRITICAL finding that has a fix available. A scan that cannot download its database fails loudly; it never reports "clean". *(pending first scan)* |
+| 3. Failure | `make image-scan` fails on a HIGH or CRITICAL finding that has a fix available. A scan that cannot download its database fails loudly; it never reports "clean". The first scan (2026-09-21) passed the gate: 0 CRITICAL, 44 HIGH (none with a fix), 49 MEDIUM, 57 LOW, 2 UNKNOWN; the register is `docs/security/image-scan.md`. A failing or unreachable-database scan was not provoked. |
 | 4. Scale | A scan takes seconds to a few minutes once the database is cached. In CI (Phase 6) the same script runs on every build. |
 | 5. Security | The scanner is part of the supply chain: in March 2026 Trivy releases 0.69.4 to 0.69.6 were malicious. The version is pinned, those versions are refused by `make test`, and the image can be pinned by digest. Cosign verification of the release is recommended and **not done**. A scan is a point-in-time statement about known vulnerabilities, not proof of safety. |
 | 6. Cloud | Registry-side scanning (ECR, ACR, GHCR with Dependabot), admission control that rejects unscanned or unsigned images (Phase 15). **Not done here.** |

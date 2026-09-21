@@ -212,7 +212,7 @@ The image is built from `app/ai_service/Dockerfile` by `scripts/build/image.sh`,
 
 ```bash
 make image-info      # tags, base image and scanner that would be used
-make image-pin       # once: prints PYTHON_BASE_DIGEST= and TRIVY_IMAGE_DIGEST= lines; paste them into versions.env and commit
+make image-pin       # prints PYTHON_BASE_DIGEST= and TRIVY_IMAGE_DIGEST= lines; paste them into versions.env and commit (done once; run again to bump)
 make image-build     # builds <registry>/polaris/ai-service:<version>-<git sha> and :<version>
 make image-check     # starts the image and verifies: non-root, /healthz, /readyz, the /v1/chat contract, JSON logs, HEALTHCHECK, SIGTERM
 make image-run       # runs it hardened on http://127.0.0.1:8000 (Ctrl+C to stop)
@@ -227,9 +227,9 @@ make image-sbom      # CycloneDX SBOM in artifacts/
 
 **Run restrictions.** `make image-run` and `make image-check` run the container with a read-only root filesystem, all Linux capabilities dropped, `no-new-privileges`, a 256 MB memory limit and a process limit. They are the restrictions the Kubernetes manifests apply in Phase 4.
 
-**Digest pins.** Until `PYTHON_BASE_DIGEST` is set, the base image is a moving tag: the build works, but two builds a month apart can differ, and `make image-build` warns about it. After `make image-pin`, pinned builds are reproducible for the base layer. Bumping the pin is a deliberate commit, followed by `make image-check` and `make image-scan`.
+**Digest pins.** Both `PYTHON_BASE_DIGEST` and `TRIVY_IMAGE_DIGEST` are pinned in `versions.env` (2026-09-21). Without a pin the base image is a moving tag: the build works, but two builds a month apart can differ, and `make image-build` warns about it. With the pin, builds are reproducible for the base layer. Bumping the pin is a deliberate commit, followed by `make image-check` and `make image-scan`.
 
-**Scanner and SBOM.** Trivy runs as a container on a saved copy of the image (`docker save`), without the Docker socket. Reports and SBOMs land in `artifacts/` (git-ignored); the first scan downloads the vulnerability database (hundreds of MB) into `artifacts/trivy-cache`. Findings that cannot be fixed yet are recorded in `docs/security/image-scan.md`.
+**Scanner and SBOM.** Trivy runs as a container on a saved copy of the image (`docker save`), without the Docker socket. Reports and SBOMs land in `artifacts/` (git-ignored); the first scan downloads the vulnerability database into `artifacts/trivy-cache` (about four minutes on the reference machine; later scans reuse it). Findings that cannot be fixed yet are recorded in `docs/security/image-scan.md`.
 
 ## 10. Run profiles (memory budget)
 
