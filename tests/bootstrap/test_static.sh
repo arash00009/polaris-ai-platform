@@ -311,7 +311,10 @@ else
   bad ".yamllint.yml must exist and configure the line-length rule"
 fi
 
-# 35. .venv-ci (the throwaway venv scripts/ci/*.sh create) is gitignored
+# 35. .venv-ci (the throwaway venv scripts/ci/*.sh create) is gitignored.
+# Accepts both the unanchored form (.venv-ci/) and the root-anchored form
+# (/.venv-ci/) — the latter is what Phase 6's .gitignore fix uses, to avoid
+# the same unanchored-pattern bug that once hid scripts/build/image.sh.
 if grep -qxE '/?\.venv-ci/' .gitignore; then ok ".venv-ci/ is gitignored"; else bad ".gitignore must exclude .venv-ci/"; fi
 
 # 36. scripts/build/image.sh gained a publish subcommand (GHCR) without touching push (local registry)
@@ -404,6 +407,86 @@ if [[ -f "$WF" ]]; then
   else
     bad "$WF is missing a call to these make targets, or the target no longer exists:$missing"
   fi
+fi
+
+# --- Phase 7: post-deploy verification (scripts/verify/post-deploy.sh) -------------------------
+
+# 42. scripts/verify/post-deploy.sh exists (syntax/executable already covered by checks 1-2)
+VERIFY_SCRIPT="scripts/verify/post-deploy.sh"
+if [[ -f "$VERIFY_SCRIPT" ]]; then ok "$VERIFY_SCRIPT exists"; else bad "$VERIFY_SCRIPT is missing"; fi
+
+# 43. it implements all six checks the Phase 7 roadmap line names: rollout, health, readyz,
+# a real AI answer, logs, metrics
+if [[ -f "$VERIFY_SCRIPT" ]]; then
+  missing=""
+  for fn in check_rollout check_health check_ready check_ai_answer check_logs check_metrics; do
+    grep -q "^${fn}()" "$VERIFY_SCRIPT" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$VERIFY_SCRIPT implements rollout, health, readyz, ai-answer, logs and metrics checks"
+  else
+    bad "$VERIFY_SCRIPT is missing checks:$missing"
+  fi
+fi
+
+# 44. main() actually calls all six, not just defines them
+if [[ -f "$VERIFY_SCRIPT" ]]; then
+  main_body="$(awk '/^main\(\)/,/^}/' "$VERIFY_SCRIPT")"
+  missing=""
+  for fn in check_rollout check_health check_ready check_ai_answer check_logs check_metrics; do
+    grep -q "$fn" <<<"$main_body" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "main() calls all six checks"
+  else
+    bad "$VERIFY_SCRIPT defines but main() never calls:$missing"
+  fi
+fi
+
+# 45. the AI-answer check looks at the actual answer content, not just that the envelope has the
+# right keys (that weaker check already exists in Phase 5's helm.sh smoke)
+if [[ -f "$VERIFY_SCRIPT" ]] && grep -q '\.response | length > 0' "$VERIFY_SCRIPT"; then
+  ok "$VERIFY_SCRIPT checks that response.response is non-empty, not just present"
+else
+  bad "$VERIFY_SCRIPT must assert the AI answer itself is non-empty, not only that the field exists"
+fi
+
+# 46. the metrics check is advisory: it must never be able to fail the whole verification by
+# itself, since there is no Prometheus/threshold-based analysis until Phase 9/10/18
+if [[ -f "$VERIFY_SCRIPT" ]]; then
+  metrics_body="$(awk '/^check_metrics\(\)/,/^}/' "$VERIFY_SCRIPT")"
+  if grep -q 'record_warn' <<<"$metrics_body" && ! grep -q 'record_fail' <<<"$metrics_body"; then
+    ok "check_metrics is advisory (record_warn only, never record_fail)"
+  else
+    bad "check_metrics must only ever record_warn, never record_fail — it has no threshold to judge against yet"
+  fi
+fi
+
+# 47. every other check reports through record_pass/record_fail instead of calling die() itself,
+# so one run can report every problem instead of stopping at the first (unlike helm.sh's smoke)
+if [[ -f "$VERIFY_SCRIPT" ]]; then
+  die_in_checks="$(awk '/^check_/{f=1} /^main\(\)/{f=0} f' "$VERIFY_SCRIPT" | grep -c '\bdie\b' || true)"
+  if [[ "$die_in_checks" -eq 0 ]]; then
+    ok "individual checks never call die() — all six always run, and all failures are reported together"
+  else
+    bad "a check_* function calls die() directly, which would stop the script before every check has run"
+  fi
+fi
+
+# 48. Makefile: verify-dev/staging/prod exist and route to the right script and environment
+for env in dev staging prod; do
+  if grep -qE "^verify-${env}:" Makefile && grep -A1 "^verify-${env}:" Makefile | grep -q "post-deploy.sh ${env}"; then
+    ok "Makefile target: verify-$env"
+  else
+    bad "Makefile is missing verify-$env, or it does not call post-deploy.sh $env"
+  fi
+done
+
+# 49. make lint shellchecks scripts/verify/*.sh too
+if grep -q 'scripts/verify/\*\.sh' Makefile; then
+  ok "make lint shellchecks scripts/verify/*.sh too"
+else
+  bad "Makefile's lint target must include scripts/verify/*.sh"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"

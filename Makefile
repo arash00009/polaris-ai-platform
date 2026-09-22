@@ -15,7 +15,8 @@ PY      := $(VENV)/bin/python
 	helm-logs-dev helm-logs-staging helm-logs-prod \
 	helm-smoke-dev helm-smoke-staging helm-smoke-prod \
 	helm-uninstall-dev helm-uninstall-staging helm-uninstall-prod \
-	ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify
+	ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify \
+	verify-dev verify-staging verify-prod
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -27,7 +28,7 @@ doctor: ## Check that this machine can run the platform
 	./scripts/bootstrap/doctor.sh
 
 lint: ## Lint all shell scripts with shellcheck
-	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh scripts/ci/*.sh tests/bootstrap/*.sh
+	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh scripts/ci/*.sh scripts/verify/*.sh tests/bootstrap/*.sh
 
 test: ## Run static tests (no Docker or cluster needed)
 	./tests/bootstrap/test_static.sh
@@ -189,3 +190,16 @@ ci-workflow-lint: ## Lint .github/workflows/*.yml with yamllint and actionlint (
 	./scripts/ci/workflow-lint.sh
 
 ci-verify: lint test ci-secrets-scan ci-deps-audit ci-workflow-lint ## Everything CI checks before it needs Docker or a cluster
+
+# --- Phase 7: post-deploy verification (scripts/verify/post-deploy.sh), the local-cluster half --
+# of ADR-12's two verification loops. Run after any helm-apply-<env>, not part of CI (loop 1
+# already deploys+smokes its own ephemeral cluster inside build-scan-deploy — see ADR-24).
+
+verify-dev: ## Rollout, health, readyz, a real AI answer, logs and (advisory) metrics for the dev release
+	./scripts/verify/post-deploy.sh dev
+
+verify-staging: ## Same checks as verify-dev, for the staging release
+	./scripts/verify/post-deploy.sh staging
+
+verify-prod: ## Same checks as verify-dev, for the prod release
+	./scripts/verify/post-deploy.sh prod
