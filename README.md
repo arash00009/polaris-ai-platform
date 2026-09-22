@@ -17,7 +17,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 2 | AI service (FastAPI, swappable model backend) | Done — verified on the target machine (2026-09-21): 87 unit tests at 99 % coverage, and the running service answered 200, 422, 404, 502 and 504 as designed. The real model backend is only tested against a fake transport until Phase 11 |
 | 3 | Containerization, Trivy, SBOM | Done (verified 2026-09-21) — 125 unit tests and 41 static checks pass; the 134 MB non-root image was built, checked (9/9), pushed to the local registry, scanned (0 CRITICAL, 44 HIGH, none with a fix, all recorded in `docs/security/image-scan.md`) and an SBOM was generated. Not done: image signing, review of MEDIUM/LOW findings |
 | 4 | Kubernetes manifests (Deployment, Service, Ingress, PDB, NetworkPolicy) | Done (verified 2026-09-22) — 64 static checks pass; image `0.3.0-c446b6b88521` built, pushed and deployed to `polaris-dev`, 2/2 pods reached `Ready`, the default-deny `NetworkPolicy` did not disrupt readiness (one data point, not a general guarantee — see ADR-22), and the smoke test passed `/healthz`, `/readyz` and `/v1/chat` through Traefik. Not done: Helm/multi-environment (Phase 5), load-test-measured resource requests |
-| 5 | Helm chart, multi-environment values | Planned |
+| 5 | Helm chart, multi-environment values | In progress — `helm/ai-platform/` written; 88 static checks pass; template logic checked in the sandbox against Phase 4's verified manifests (a real Helm binary could not be installed there — `get.helm.sh` is outside the sandbox's egress allowlist). `helm lint`/`helm upgrade --install` on the target machine (Helm 4.3.0, already installed) is pending |
 | 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
 | 8 | GitOps with Argo CD (separate configuration repository) | Planned |
 | 9–10 | Observability: Prometheus, Loki, Tempo, Grafana, OpenTelemetry | Planned |
@@ -52,6 +52,10 @@ make image-scan      # Trivy scan; make image-sbom writes the SBOM
 make image-push      # push the image to the local registry (needed before deploy-apply)
 make deploy-apply    # Phase 4: Deployment, Service, Ingress, PDB, NetworkPolicy in polaris-dev
 make deploy-smoke    # /healthz, /readyz and /v1/chat through Traefik
+
+make helm-lint         # Phase 5: helm lint the chart against dev/staging/prod values
+make helm-apply-dev    # helm upgrade --install into polaris-dev (repeat with -staging/-prod)
+make helm-smoke-dev    # /healthz, /readyz and /v1/chat through Traefik, for that release
 ```
 
 `make help` lists every target.
@@ -67,12 +71,15 @@ make deploy-smoke    # /healthz, /readyz and /v1/chat through Traefik
 ├── deploy/
 │   ├── k3d/cluster.yaml     # local cluster definition (k3s image pinned here)
 │   ├── k8s-smoke/           # throwaway workload used by `make smoke`
-│   └── k8s/ai-service/      # Phase 4 manifests: namespace, config, Deployment, Service, Ingress, PDB, NetworkPolicy
+│   └── k8s/ai-service/      # Phase 4 manifests (kept as a reference, ADR-23): namespace, config, Deployment, Service, Ingress, PDB, NetworkPolicy
+├── helm/
+│   └── ai-platform/         # Phase 5 chart: Chart.yaml, values.yaml, values-{dev,staging,prod}.yaml, templates/
 ├── scripts/
 │   ├── lib/common.sh        # shared shell helpers
 │   ├── bootstrap/           # install-tools, doctor, cluster, smoke-test
 │   ├── build/image.sh       # image build, check, push, scan and SBOM (Phase 3)
-│   └── deploy/app.sh        # apply, status, logs, smoke and delete for ai-service (Phase 4)
+│   ├── deploy/app.sh        # apply, status, logs, smoke and delete for ai-service (Phase 4, raw manifests)
+│   └── deploy/helm.sh       # lint, template, apply, status, logs, smoke, uninstall — per environment (Phase 5)
 ├── tests/bootstrap/         # static tests for the scripts and configuration
 └── docs/
     ├── architecture.md      # design, diagrams, technology choices, roadmap
@@ -83,7 +90,7 @@ make deploy-smoke    # /healthz, /readyz and /v1/chat through Traefik
     └── adr/README.md        # architecture decision records
 ```
 
-More directories (`helm/`, `.github/workflows/`, …) appear as their phases are built.
+More directories (`.github/workflows/`, …) appear as their phases are built.
 
 ## Implemented / Demonstrated / Documented
 

@@ -1,0 +1,11 @@
+# helm/ai-platform/values-dev.yaml — Phase 5: the polaris-dev environment.
+#
+# Same shape as deploy/k8s/ai-service/*.yaml (Phase 4), which only ever applied to polaris-dev.
+# Migrating that namespace from raw manifests to this chart is a `make deploy-delete` (removes
+# the Phase 4 resources, keeps the namespace) followed by `make helm-apply-dev` — see the Phase 5
+# guide, "Steg 3".
+environment: dev
+namespace: polaris-dev
+
+ingress:
+  host: ai.localhost

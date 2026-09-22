@@ -155,3 +155,30 @@ Status: **written, statically checked** (`tests/bootstrap/test_static.sh`, 64 ch
 | 4. Scale | Both are namespace-scoped and cost nothing beyond the API objects themselves. |
 | 5. Security | The `NetworkPolicy` is the first place in this project where "which pods may talk to this one" is enforced by the platform instead of assumed. It does not cover egress (the service makes no outbound calls yet — Phase 11 changes that) and it is one namespace, not the default-deny-everywhere posture a real platform would want across all namespaces (Phase 15). |
 | 6. Cloud | Same primitives on any CNCF-conformant CNI; a managed cluster typically adds a cloud load balancer's own health checks on top of the `PodDisruptionBudget`. |
+
+## Phase 5
+
+Status: chart written (`helm/ai-platform/`), rendered logic checked in the sandbox against a custom Go-template-subset renderer and semantically diffed field-for-field against Phase 4's target-machine-verified manifests (match, aside from Helm's own bookkeeping labels and the parameterised image reference) — `helm lint`/`helm template`/`helm upgrade --install` with the real Helm 4 binary is *(pending first apply)* on the target machine.
+
+### One chart, three environments (`helm/ai-platform`)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Phase 4 could only ever apply `polaris-dev` from hand-written YAML; adding `polaris-staging`/`polaris-prod` that way would mean three near-identical copies of seven files, drifting the moment one of them is hand-edited. |
+| 2. Why | One chart, `values.yaml` for what's identical (security context, probes, NetworkPolicy shape, ConfigMap keys) plus one thin `values-<env>.yaml` per environment for what differs (namespace, ingress host, and — prod only — replica count and disruption budget) is the smallest change that removes the duplication (ADR-23). |
+| 3. Failure | A missing or misspelled value fails the template render via an explicit `required` guard (`environment`, `namespace`, `ingress.host`, `image.repository`, `image.tag`) rather than deploying into the wrong namespace or with no image reference. *(pending first apply)* |
+| 4. Scale | Rendering is instant regardless of environment count; a fourth environment is one more `values-<env>.yaml`, not one more copy of the templates. |
+| 5. Security | Selector labels (`app.kubernetes.io/name`) and Helm's own bookkeeping labels are two separate template helpers on purpose, so upgrading a release can never accidentally touch a Deployment's immutable `spec.selector`. The Namespace template is annotated `helm.sh/resource-policy: keep` so `helm uninstall` cannot delete it, matching Phase 4's `deploy-delete` behaviour. |
+| 6. Cloud | The same chart is what Phase 8's Argo CD points at instead of a person running `helm upgrade --install` by hand; nothing about the chart itself needs to change for GitOps to take over. |
+
+### Verification without a live Helm binary in the sandbox
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Every earlier phase's scripts could at least be shellchecked and syntax-checked in the sandbox before the target machine ran them for real. Helm itself could not even be installed here: `get.helm.sh` is not on the sandbox's allowlisted egress (package registries and Anthropic's own hosts only), so there was no `helm` binary to run `helm lint`/`helm template` with. |
+| 2. Why | Rather than skip verification, a small Python script was written that implements only the exact Go-template constructs the chart actually uses (`.Values.x.y` lookups, `include`, `required`, `toYaml`, top-level `if`/`range`) and renders all three environments' full YAML, which was then diffed field-for-field against Phase 4's already-verified manifests. |
+| 3. Failure | This renderer is not Helm — it would not catch a Helm-specific templating mistake outside the constructs it implements (nested conditionals, subcharts, hooks, `lookup`, none of which this chart uses). It caught two real bugs while being built (a context-lookup bug and a missing `default` filter), which is itself evidence it is checking something, but the real `helm lint`/`helm template`/`helm upgrade --install --dry-run` on the target machine (Helm 4.3.0, already installed by Phase 1's `make tools-install`) is the check that actually counts. |
+| 4. Scale | N/A — a one-off verification aid, not part of the shipped chart or scripts. |
+| 5. Security | N/A. |
+| 6. Cloud | N/A — every real environment has network access to install Helm properly; this workaround is specific to this sandbox's egress allowlist. |
+

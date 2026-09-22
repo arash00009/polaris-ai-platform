@@ -1,0 +1,20 @@
+# helm/ai-platform/templates/namespace.yaml — Phase 5.
+#
+# "helm.sh/resource-policy": keep means `helm uninstall` never deletes this namespace, matching
+# Phase 4's app.sh delete (which removes ai-service's own resources but always keeps the
+# namespace). PSA restricted, same as deploy/k8s/ai-service/namespace.yaml (Phase 4, ADR-22).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "ai-platform.namespace" . }}
+  annotations:
+    "helm.sh/resource-policy": keep
+  labels:
+    app.kubernetes.io/part-of: polaris
+    environment: {{ required "values-<env>.yaml must set 'environment'" .Values.environment }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: {{ .Values.podSecurityStandard.version }}
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: {{ .Values.podSecurityStandard.version }}
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: {{ .Values.podSecurityStandard.version }}

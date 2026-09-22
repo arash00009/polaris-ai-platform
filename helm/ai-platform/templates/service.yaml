@@ -1,0 +1,15 @@
+# helm/ai-platform/templates/service.yaml — Phase 5. Same as deploy/k8s/ai-service/service.yaml.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ai-platform.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

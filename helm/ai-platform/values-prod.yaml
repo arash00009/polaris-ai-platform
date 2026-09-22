@@ -1,0 +1,17 @@
+# helm/ai-platform/values-prod.yaml — Phase 5: the polaris-prod environment.
+#
+# Two knobs are deliberately different from dev/staging, and both are operational policy
+# decisions, not capacity numbers — the resource requests/limits stay identical everywhere
+# because nobody has load-tested this service (see values.yaml's comment; Phase 9/11 fixes that):
+#   - replicaCount: 3, so a single voluntary disruption never drops below 2 running pods.
+#   - podDisruptionBudget.minAvailable: 2, matching that same intent.
+environment: prod
+namespace: polaris-prod
+
+replicaCount: 3
+
+podDisruptionBudget:
+  minAvailable: 2
+
+ingress:
+  host: ai-prod.localhost

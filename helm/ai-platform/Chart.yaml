@@ -1,0 +1,19 @@
+# helm/ai-platform/Chart.yaml — Phase 5.
+#
+# One chart, three environments (docs/architecture.md 4.3, ADR-11, ADR-23): the same templates,
+# rendered with values-dev.yaml / values-staging.yaml / values-prod.yaml. Today the chart has a
+# single component (ai-service, the Phase 3/4 image); the name is "ai-platform" — not
+# "ai-service" — because docs/architecture.md Part D already names this path for the whole
+# platform's chart, and Phase 12's ai-gateway is expected to become a second component of it
+# rather than a reason to rename it later.
+apiVersion: v2
+name: ai-platform
+description: Polaris AI Platform Helm chart — ai-service, parameterised for polaris-dev/staging/prod (Phase 5)
+type: application
+# Chart version: bump on any template/values-shape change. Independent of appVersion below.
+version: 0.1.0
+# Informational only (shown by `helm list`, not used by any template). The real image tag that
+# gets deployed is always computed by scripts/deploy/helm.sh from git, exactly like Phase 4's
+# app_version()/app_revision() in scripts/build/image.sh and scripts/deploy/app.sh — this field
+# does not drive it and can drift from it; do not read it as the deployed version.
+appVersion: "0.3.0"

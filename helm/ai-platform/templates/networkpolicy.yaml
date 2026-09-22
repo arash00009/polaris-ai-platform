@@ -1,0 +1,39 @@
+# helm/ai-platform/templates/networkpolicy.yaml — Phase 5. Same two-object default-deny +
+# allow-from-kube-system pattern as deploy/k8s/ai-service/networkpolicy.yaml (Phase 4, ADR-22).
+# Same unresolved risk too: whether kubelet's own probe traffic is exempted from an "Ingress"
+# policy is implementation-specific. Phase 4 verified this holds on the target machine's k3s;
+# scripts/deploy/helm.sh applies this chart's NetworkPolicy the same way app.sh did — after the
+# Deployment is healthy — and the Phase 5 guide says to re-check readiness per environment.
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-service-default-deny
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-service-allow-ingress
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-platform.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
+{{- end }}

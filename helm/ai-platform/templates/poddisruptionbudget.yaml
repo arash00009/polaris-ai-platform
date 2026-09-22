@@ -1,0 +1,17 @@
+# helm/ai-platform/templates/poddisruptionbudget.yaml — Phase 5. Same as
+# deploy/k8s/ai-service/poddisruptionbudget.yaml; minAvailable varies per environment (see
+# values-prod.yaml's comment on why prod's is 2, not a load-tested number).
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-service
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "ai-platform.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -188,5 +188,92 @@ else
   bad "namespace mismatch between scripts/deploy/app.sh ('$NS_FROM_SCRIPT') and:$ns_mismatch"
 fi
 
+# ---- Phase 5: Helm chart (helm/ai-platform) -------------------------------------------------
+HDIR="helm/ai-platform"
+
+# 23. Chart.yaml and every expected template file exist
+if [[ -f "$HDIR/Chart.yaml" ]]; then ok "$HDIR/Chart.yaml exists"; else bad "$HDIR/Chart.yaml is missing"; fi
+for f in _helpers.tpl namespace.yaml configmap.yaml deployment.yaml service.yaml ingress.yaml poddisruptionbudget.yaml networkpolicy.yaml NOTES.txt; do
+  if [[ -f "$HDIR/templates/$f" ]]; then ok "$HDIR/templates/$f exists"; else bad "$HDIR/templates/$f is missing"; fi
+done
+
+# 24. values.yaml and one values-<env>.yaml per environment exist
+for f in values.yaml values-dev.yaml values-staging.yaml values-prod.yaml; do
+  if [[ -f "$HDIR/$f" ]]; then ok "$HDIR/$f exists"; else bad "$HDIR/$f is missing"; fi
+done
+
+# 25. every values-<env>.yaml is valid YAML and sets namespace/environment/ingress.host
+if have python3; then
+  for env in dev staging prod; do
+    vf="$HDIR/values-$env.yaml"
+    [[ -f "$vf" ]] || continue
+    if python3 -c "
+import sys, yaml
+d = yaml.safe_load(open('$vf')) or {}
+env, ns, host = d.get('environment'), d.get('namespace'), (d.get('ingress') or {}).get('host')
+assert env == '$env', f'environment must be \'$env\', got {env!r}'
+assert ns == 'polaris-$env', f'namespace must be \'polaris-$env\', got {ns!r}'
+assert host, 'ingress.host must be set'
+" 2>/tmp/helm_values_check.err; then
+      ok "$vf sets environment=$env, namespace=polaris-$env, ingress.host"
+    else
+      bad "$vf: $(cat /tmp/helm_values_check.err)"
+    fi
+  done
+else
+  bad "python3 not found: cannot validate $HDIR/values-*.yaml"
+fi
+
+# 26. the three ingress hosts (dev/staging/prod) are distinct from each other and from Phase 1's whoami.localhost
+if have python3; then
+  hosts="$(python3 -c "
+import yaml
+for env in ('dev', 'staging', 'prod'):
+    d = yaml.safe_load(open(f'$HDIR/values-{env}.yaml')) or {}
+    print((d.get('ingress') or {}).get('host', ''))
+")"
+  n_distinct="$(sort -u <<<"$hosts" | grep -c .)"
+  if [[ "$n_distinct" -eq 3 ]] && ! grep -qx 'whoami.localhost' <<<"$hosts"; then
+    ok "dev/staging/prod ingress hosts are distinct and do not collide with whoami.localhost"
+  else
+    bad "ingress hosts must be three distinct values, none equal to whoami.localhost (got: $(tr '\n' ' ' <<<"$hosts"))"
+  fi
+fi
+
+# 27. no hardcoded namespace/environment inside templates/ (everything must come from values, unlike Phase 4's raw YAML)
+if grep -rEl 'namespace: polaris-(dev|staging|prod)' "$HDIR/templates" >/dev/null 2>&1; then
+  bad "a template under $HDIR/templates hardcodes a namespace instead of using {{ include \"ai-platform.namespace\" . }}"
+else
+  ok "no template under $HDIR/templates hardcodes a namespace"
+fi
+
+# 28. deployment.yaml never hardcodes an image reference (must come from values, no 'latest')
+DTPL="$HDIR/templates/deployment.yaml"
+if [[ -f "$DTPL" ]] && grep -qE 'image:\s*"?[a-zA-Z0-9.]+/.*:(latest)?"?\s*$' "$DTPL"; then
+  bad "$DTPL must not hardcode an image reference or use :latest"
+else
+  ok "$DTPL takes its image from values (image.repository/image.tag), no :latest"
+fi
+
+# 29. deployment.yaml still carries the Phase 3/4 hardening fields, now as template lines
+if [[ -f "$DTPL" ]] \
+  && grep -q 'runAsNonRoot: true' "$DTPL" \
+  && grep -q 'runAsUser: 10001' "$DTPL" \
+  && grep -q 'readOnlyRootFilesystem: true' "$DTPL" \
+  && grep -q 'drop: \["ALL"\]' "$DTPL"; then
+  ok "$DTPL keeps the Phase 3/4 securityContext hardening fields"
+else
+  bad "$DTPL is missing one or more of: runAsNonRoot, runAsUser: 10001, readOnlyRootFilesystem, capabilities.drop: [ALL]"
+fi
+
+# 30. scripts/deploy/helm.sh and the chart agree on the registry image repository pattern
+# shellcheck disable=SC2016
+if grep -q 'CLUSTER_REPO="\$REG_NAME:5000/\$IMAGE_REPO"' scripts/deploy/helm.sh \
+  && grep -q 'IMAGE_REPO="polaris/ai-service"' scripts/deploy/helm.sh; then
+  ok "scripts/deploy/helm.sh computes the same registry image repository pattern as scripts/deploy/app.sh"
+else
+  bad "scripts/deploy/helm.sh's image repository computation changed unexpectedly"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

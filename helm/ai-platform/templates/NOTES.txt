@@ -1,0 +1,11 @@
+ai-service ({{ .Values.environment }}) deployed to namespace {{ include "ai-platform.namespace" . }}.
+
+Check status:
+  kubectl --context k3d-polaris -n {{ include "ai-platform.namespace" . }} get deployment,pods,svc,ingress,pdb,networkpolicy
+
+Smoke test through Traefik (replace <port> with the ingress host port from deploy/k3d/cluster.yaml,
+8088 on the reference machine):
+  curl -H "Host: {{ .Values.ingress.host }}" http://localhost:<port>/healthz
+
+Or use the wrapper script, which reads the port for you:
+  scripts/deploy/helm.sh smoke {{ .Values.environment }}

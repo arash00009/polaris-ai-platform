@@ -1,0 +1,25 @@
+# helm/ai-platform/templates/ingress.yaml — Phase 5. Same as deploy/k8s/ai-service/ingress.yaml,
+# except the host comes from values-<env>.yaml so all three releases can share one Traefik and
+# one k3d ingress port, routed by Host header (ai.localhost / ai-staging.localhost / ai-prod.localhost).
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-service
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    - host: {{ required "values-<env>.yaml must set 'ingress.host'" .Values.ingress.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-service
+                port:
+                  number: 80
+{{- end }}

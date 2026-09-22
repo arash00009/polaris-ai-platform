@@ -8,7 +8,13 @@ PY      := $(VENV)/bin/python
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
 	app-install app-lint app-test app-check app-run \
 	image-info image-pin image-build image-run image-check image-push image-scan image-sbom \
-	deploy-info deploy-apply deploy-status deploy-logs deploy-smoke deploy-delete
+	deploy-info deploy-apply deploy-status deploy-logs deploy-smoke deploy-delete \
+	helm-lint helm-template-dev helm-template-staging helm-template-prod \
+	helm-apply-dev helm-apply-staging helm-apply-prod \
+	helm-status-dev helm-status-staging helm-status-prod \
+	helm-logs-dev helm-logs-staging helm-logs-prod \
+	helm-smoke-dev helm-smoke-staging helm-smoke-prod \
+	helm-uninstall-dev helm-uninstall-staging helm-uninstall-prod
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -104,3 +110,63 @@ deploy-smoke: ## Call the deployed ai-service through Traefik and check the /v1/
 
 deploy-delete: ## Remove the ai-service workload from the cluster (keeps the polaris-dev namespace)
 	./scripts/deploy/app.sh delete
+
+# --- Phase 5: Helm (helm/ai-platform), replaces deploy-* above one environment at a time -------
+# deploy/k8s/ai-service/ (Phase 4) is kept as a raw-manifest reference; it is not applied by these.
+
+helm-lint: ## helm lint the chart against all three values files (uses a placeholder image tag)
+	./scripts/deploy/helm.sh lint
+
+helm-template-dev: ## Render the chart for polaris-dev with the real computed image tag (no cluster needed)
+	./scripts/deploy/helm.sh template dev
+
+helm-template-staging: ## Render the chart for polaris-staging with the real computed image tag
+	./scripts/deploy/helm.sh template staging
+
+helm-template-prod: ## Render the chart for polaris-prod with the real computed image tag
+	./scripts/deploy/helm.sh template prod
+
+helm-apply-dev: ## helm upgrade --install the dev release (needs: cluster-up, image-build, image-push)
+	./scripts/deploy/helm.sh apply dev
+
+helm-apply-staging: ## helm upgrade --install the staging release
+	./scripts/deploy/helm.sh apply staging
+
+helm-apply-prod: ## helm upgrade --install the prod release
+	./scripts/deploy/helm.sh apply prod
+
+helm-status-dev: ## Show the dev release's status and resources
+	./scripts/deploy/helm.sh status dev
+
+helm-status-staging: ## Show the staging release's status and resources
+	./scripts/deploy/helm.sh status staging
+
+helm-status-prod: ## Show the prod release's status and resources
+	./scripts/deploy/helm.sh status prod
+
+helm-logs-dev: ## Tail the dev release's pods' JSON logs (add ARGS=--follow to keep streaming)
+	./scripts/deploy/helm.sh logs dev $(ARGS)
+
+helm-logs-staging: ## Tail the staging release's pods' JSON logs (add ARGS=--follow)
+	./scripts/deploy/helm.sh logs staging $(ARGS)
+
+helm-logs-prod: ## Tail the prod release's pods' JSON logs (add ARGS=--follow)
+	./scripts/deploy/helm.sh logs prod $(ARGS)
+
+helm-smoke-dev: ## Call the dev release through Traefik and check the /v1/chat contract
+	./scripts/deploy/helm.sh smoke dev
+
+helm-smoke-staging: ## Call the staging release through Traefik and check the /v1/chat contract
+	./scripts/deploy/helm.sh smoke staging
+
+helm-smoke-prod: ## Call the prod release through Traefik and check the /v1/chat contract
+	./scripts/deploy/helm.sh smoke prod
+
+helm-uninstall-dev: ## Remove the dev release (keeps the polaris-dev namespace)
+	./scripts/deploy/helm.sh uninstall dev
+
+helm-uninstall-staging: ## Remove the staging release (keeps the polaris-staging namespace)
+	./scripts/deploy/helm.sh uninstall staging
+
+helm-uninstall-prod: ## Remove the prod release (keeps the polaris-prod namespace)
+	./scripts/deploy/helm.sh uninstall prod

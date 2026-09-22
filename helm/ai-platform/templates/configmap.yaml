@@ -1,0 +1,13 @@
+# helm/ai-platform/templates/configmap.yaml — Phase 5. Non-secret POLARIS_* settings from
+# values.yaml's `config` map — same keys as deploy/k8s/ai-service/configmap.yaml (Phase 4).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-service-config
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

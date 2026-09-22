@@ -1,0 +1,88 @@
+# helm/ai-platform/values.yaml — Phase 5: shared defaults for every environment.
+#
+# environment/namespace/ingress.host have no default on purpose: every install must pick an
+# environment explicitly with `-f values-<env>.yaml`, so nobody accidentally installs into
+# "default". scripts/deploy/helm.sh always passes one of the three env files; it never installs
+# from this file alone.
+#
+# Everything below this line is identical to what deploy/k8s/ai-service/*.yaml (Phase 4) already
+# applies to polaris-dev — same security posture, same probes, same resource estimate. Phase 5
+# does not change what gets deployed, only how many copies of it can exist without duplicating
+# YAML (docs/architecture.md roadmap, Phase 5 "Done when").
+
+environment: ""
+namespace: ""
+
+nameOverride: "ai-service"
+
+image:
+  # Cluster-internal registry reference (matches the REG_NAME:5000/<repo> pattern from
+  # scripts/deploy/app.sh — see deploy/k3d/cluster.yaml for where the registry name comes from).
+  repository: "registry.localhost:5000/polaris/ai-service"
+  # No default: scripts/deploy/helm.sh always passes --set image.tag=<version>-<git-sha>,
+  # computed the same way as Phase 3/4 (app_version() + app_revision()). A missing tag fails the
+  # template render (see the `required` guard in templates/deployment.yaml) rather than silently
+  # deploying nothing or "latest" (ADR-19).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+# Non-secret POLARIS_* settings — identical to deploy/k8s/ai-service/configmap.yaml. Every
+# environment runs the mock backend until Phase 11 wires a real model server.
+config:
+  POLARIS_BACKEND: "mock"
+  POLARIS_LOG_LEVEL: "INFO"
+  POLARIS_READY_TIMEOUT_S: "2"
+  POLARIS_MOCK_MODEL_NAME: "mock-1"
+  POLARIS_MOCK_READY: "true"
+
+# Starting point only: the Phase 3 `docker run` figures, not measured under load (ADR-22,
+# docs/component-qa.md). Identical across environments — Phase 5 varies replica count and the
+# disruption budget per environment (legitimate operational knobs), not resource numbers nobody
+# has measured. Phase 9/11 replace this with numbers from an actual load test.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+
+probes:
+  liveness:
+    path: /healthz
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    periodSeconds: 5
+    failureThreshold: 3
+  startup:
+    path: /healthz
+    periodSeconds: 2
+    failureThreshold: 15
+
+# Mitigates, does not fix, the Phase 3 gap (ADR-20): /readyz does not flip on shutdown.
+lifecycle:
+  preStopSleepSeconds: 5
+terminationGracePeriodSeconds: 15
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+networkPolicy:
+  enabled: true
+  allowFromNamespace: kube-system
+  allowPort: 8000
+
+ingress:
+  enabled: true
+  className: traefik
+  # No default — every environment file sets its own host so Traefik can route to the right
+  # release by Host header (all three share the same k3d ingress port).
+  host: ""
+
+podSecurityStandard:
+  version: "v1.34"

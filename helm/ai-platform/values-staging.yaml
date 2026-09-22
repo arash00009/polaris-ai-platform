@@ -1,0 +1,12 @@
+# helm/ai-platform/values-staging.yaml — Phase 5: the polaris-staging environment.
+#
+# Same resource estimate as dev (nobody has load-tested either), same replica count — staging's
+# only real difference from dev here is the namespace and the Host header Traefik routes on.
+# That is intentional and honest for a single-developer local cluster: the point of this phase is
+# proving three independently-installable releases from one chart, not inventing environment
+# differences that no measurement backs up.
+environment: staging
+namespace: polaris-staging
+
+ingress:
+  host: ai-staging.localhost

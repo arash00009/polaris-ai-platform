@@ -233,7 +233,7 @@ make image-sbom      # CycloneDX SBOM in artifacts/
 
 ## 10. Kubernetes deployment (Phase 4)
 
-The manifests are plain YAML under `deploy/k8s/ai-service/` (no Kustomize, no Helm yet — Phase 5 adds that), applied through `scripts/deploy/app.sh` via make targets. The cluster must be up (`make cluster-up`) and the image must already be pushed (`make image-build && make image-push`).
+The manifests are plain YAML under `deploy/k8s/ai-service/` (no Kustomize; Helm is section 11 below), applied through `scripts/deploy/app.sh` via make targets. Kept as a reference (ADR-23); still works, but Helm is the deploy path from Phase 5 on. The cluster must be up (`make cluster-up`) and the image must already be pushed (`make image-build && make image-push`).
 
 ```bash
 make deploy-info      # image tag, namespace and context that would be used
@@ -254,7 +254,29 @@ make deploy-delete     # removes the ai-service workload (keeps the polaris-dev 
 
 **Resource requests/limits** are the Phase 3 `docker run` numbers carried over as an estimate, not a measurement; `docs/component-qa.md` and this note both say so on purpose, until Phase 9/11 replace them with load-test numbers.
 
-## 11. Run profiles (memory budget)
+## 11. Helm deployment (Phase 5)
+
+The Phase 4 manifests above still exist under `deploy/k8s/ai-service/` and still work — they are kept as a reference (ADR-23) — but from this phase on, deploying means `helm/ai-platform/` through `scripts/deploy/helm.sh`, which renders the same fields from `values.yaml` plus one `values-dev.yaml`/`values-staging.yaml`/`values-prod.yaml` per environment instead of duplicating YAML three times.
+
+```bash
+make helm-lint             # helm lint the chart against all three values files
+make helm-template-dev     # render the dev release's manifests locally, no cluster needed
+make helm-apply-dev        # helm upgrade --install (needs: cluster-up, image-build, image-push)
+make helm-status-dev       # release status + resources in polaris-dev
+make helm-logs-dev         # tails JSON logs (ARGS=--follow to keep streaming)
+make helm-smoke-dev        # calls /healthz, /readyz and /v1/chat through Traefik
+make helm-uninstall-dev    # removes the release (keeps the polaris-dev namespace)
+```
+
+Replace `-dev` with `-staging` or `-prod` for the other two environments; all three can be installed in the cluster at once, since each is its own namespace (`polaris-dev`/`polaris-staging`/`polaris-prod`) and its own Ingress host (`ai.localhost`/`ai-staging.localhost`/`ai-prod.localhost`) behind the same Traefik.
+
+**Migrating `polaris-dev` from Phase 4 to Phase 5.** If `polaris-dev` still has Phase 4's raw-YAML-managed resources in it, `make helm-apply-dev` fails with "already exists and is not managed by Helm" — Helm refuses to take over objects it did not create. Run `make deploy-delete` first (removes those resources, keeps the namespace), then `make helm-apply-dev`. `polaris-staging`/`polaris-prod` have no such history, so `make helm-apply-staging`/`-prod` can be run directly.
+
+**What moved to values, what didn't.** Security context, probes, lifecycle, resource requests/limits, the ConfigMap's keys and the NetworkPolicy's shape are all identical to Phase 4, just read from `values.yaml` instead of hardcoded. Only `namespace`, `environment` and `ingress.host` differ per environment file, plus `replicaCount`/`podDisruptionBudget.minAvailable` for `prod` specifically (ADR-23 explains why only those two).
+
+**Verification status.** The chart's template logic was checked in the sandbox with a custom renderer (no real `helm` binary reachable there — `docs/component-qa.md`, Phase 5) and diffed field-for-field against Phase 4's already-target-machine-verified manifests. `helm lint`/`helm template`/`helm upgrade --install` with the real Helm 4.3.0 binary (already on the target machine from Phase 1's `make tools-install`) is *(pending first apply)* — see the Phase 5 guide.
+
+## 12. Run profiles (memory budget)
 
 Introduced progressively as components are added. Estimates only; measured values replace them in Phases 9 and 11.
 
@@ -264,9 +286,10 @@ Introduced progressively as components are added. Estimates only; measured value
 | `obs` | core + observability stack | 4–6 GB |
 | `full` | obs + delivery tooling + model server + FinOps | 7–10 GB |
 
-## 12. Teardown
+## 13. Teardown
 
 ```bash
-make deploy-delete   # removes the ai-service workload (kubectl, before the cluster goes away)
-make cluster-down    # deletes the cluster and the registry container
+make helm-uninstall-dev      # removes each Helm release you installed (repeat for -staging/-prod)
+make deploy-delete           # removes the Phase 4 raw-YAML ai-service workload, if it is still applied
+make cluster-down            # deletes the cluster and the registry container
 ```
