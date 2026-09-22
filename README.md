@@ -18,7 +18,8 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 3 | Containerization, Trivy, SBOM | Done (verified 2026-09-21) — 125 unit tests and 41 static checks pass; the 134 MB non-root image was built, checked (9/9), pushed to the local registry, scanned (0 CRITICAL, 44 HIGH, none with a fix, all recorded in `docs/security/image-scan.md`) and an SBOM was generated. Not done: image signing, review of MEDIUM/LOW findings |
 | 4 | Kubernetes manifests (Deployment, Service, Ingress, PDB, NetworkPolicy) | Done (verified 2026-09-22) — 64 static checks pass; image `0.3.0-c446b6b88521` built, pushed and deployed to `polaris-dev`, 2/2 pods reached `Ready`, the default-deny `NetworkPolicy` did not disrupt readiness (one data point, not a general guarantee — see ADR-22), and the smoke test passed `/healthz`, `/readyz` and `/v1/chat` through Traefik. Not done: Helm/multi-environment (Phase 5), load-test-measured resource requests |
 | 5 | Helm chart, multi-environment values | Done (verified 2026-09-22) — `helm/ai-platform/` renders `polaris-dev`/`-staging`/`-prod` from one chart; 88 static checks pass; `helm lint` passed for all three environments; `helm upgrade --install` succeeded for all three (`dev` 2/2, `staging` 2/2, `prod` 3/3 pods), NetworkPolicy held in all three, and `helm-smoke-*` passed `/healthz`, `/readyz` and `/v1/chat` for each. Two real gaps surfaced and were fixed, both in `polaris-dev` only: its pre-existing namespace (from Phase 4) had to be manually adopted into the Helm release once (`kubectl label`/`annotate`, ADR-23), and `make deploy-delete` must never be re-run once a namespace is Helm-managed — it silently deletes the Helm-owned resources while `helm status` still reports the release as deployed (ADR-23, `docs/troubleshooting.md`). Not done: three environments in a real load-tested sense — resource requests/limits are still Phase 3's estimate |
-| 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
+| 6 | CI pipeline (GitHub Actions) | Written (not yet run for real) — `.github/workflows/ci.yml`: lint, test, secret scan (gitleaks), dependency audit (pip-audit), workflow lint (yamllint + actionlint), image build/check/scan/SBOM, ephemeral-k3d deploy validation, GHCR publish (main only). 127 static checks pass. The Docker-free half (secret scan, dependency audit, workflow lint) genuinely ran in the sandbox on 2026-09-22 with real results (no leaks, no known vulnerabilities, no lint issues — actionlint's embedded shellcheck caught one real bug first). The Docker/cluster half has not run anywhere yet: no reachable Docker daemon in the sandbox, so its first real run is the target machine and, separately, the first actual GitHub Actions run after a push |
+| 7 | Continuous verification | Planned |
 | 8 | GitOps with Argo CD (separate configuration repository) | Planned |
 | 9–10 | Observability: Prometheus, Loki, Tempo, Grafana, OpenTelemetry | Planned |
 | 11–14 | Model serving, gateway, FinOps, multi-tenancy | Planned |
@@ -56,7 +57,15 @@ make deploy-smoke    # /healthz, /readyz and /v1/chat through Traefik
 make helm-lint         # Phase 5: helm lint the chart against dev/staging/prod values
 make helm-apply-dev    # helm upgrade --install into polaris-dev (repeat with -staging/-prod)
 make helm-smoke-dev    # /healthz, /readyz and /v1/chat through Traefik, for that release
+
+make ci-verify          # Phase 6: everything CI checks before it needs Docker or a cluster
+make ci-secrets-scan    # gitleaks — no committed secrets
+make ci-deps-audit      # pip-audit — app/ai_service/requirements.txt has no known vulnerabilities
+make ci-workflow-lint   # yamllint + actionlint against .github/workflows/
+make image-publish      # retag the built image and push it to GHCR (needs: docker login ghcr.io)
 ```
+
+`.github/workflows/ci.yml` runs these same `make` targets automatically on every push and pull request — see [docs/adr/README.md](docs/adr/README.md) (ADR-24).
 
 `make help` lists every target.
 
@@ -66,6 +75,9 @@ make helm-smoke-dev    # /healthz, /readyz and /v1/chat through Traefik, for tha
 .
 ├── Makefile                 # entry point for every local task
 ├── versions.env             # pinned tool versions (single source of truth)
+├── .github/
+│   └── workflows/ci.yml     # Phase 6: lint, test, secret scan, dependency audit, build, scan, SBOM, ephemeral-cluster deploy, GHCR publish
+├── .yamllint.yml            # Phase 6: relaxed yamllint config for .github/workflows/
 ├── app/
 │   └── ai_service/          # FastAPI service, ModelBackend interface, unit tests, Dockerfile
 ├── deploy/
@@ -76,10 +88,11 @@ make helm-smoke-dev    # /healthz, /readyz and /v1/chat through Traefik, for tha
 │   └── ai-platform/         # Phase 5 chart: Chart.yaml, values.yaml, values-{dev,staging,prod}.yaml, templates/
 ├── scripts/
 │   ├── lib/common.sh        # shared shell helpers
-│   ├── bootstrap/           # install-tools, doctor, cluster, smoke-test
-│   ├── build/image.sh       # image build, check, push, scan and SBOM (Phase 3)
+│   ├── bootstrap/           # install-tools (k3d, kubectl, helm, gitleaks, actionlint), doctor, cluster, smoke-test
+│   ├── build/image.sh       # image build, check, push, scan, SBOM (Phase 3) and publish to GHCR (Phase 6)
 │   ├── deploy/app.sh        # apply, status, logs, smoke and delete for ai-service (Phase 4, raw manifests)
-│   └── deploy/helm.sh       # lint, template, apply, status, logs, smoke, uninstall — per environment (Phase 5)
+│   ├── deploy/helm.sh       # lint, template, apply, status, logs, smoke, uninstall — per environment (Phase 5)
+│   └── ci/                  # secrets-scan.sh, deps-audit.sh, workflow-lint.sh (Phase 6)
 ├── tests/bootstrap/         # static tests for the scripts and configuration
 └── docs/
     ├── architecture.md      # design, diagrams, technology choices, roadmap
@@ -89,8 +102,6 @@ make helm-smoke-dev    # /healthz, /readyz and /v1/chat through Traefik, for tha
     ├── security/image-scan.md  # image scan results and accepted findings
     └── adr/README.md        # architecture decision records
 ```
-
-More directories (`.github/workflows/`, …) appear as their phases are built.
 
 ## Implemented / Demonstrated / Documented
 

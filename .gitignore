@@ -39,3 +39,7 @@ trivy-results.*
 
 # Scanner reports, SBOMs, saved image tarballs and the vulnerability database cache (make image-scan)
 artifacts/
+
+# Throwaway virtualenv for CI-only Python tools (pip-audit, yamllint), Phase 6. Not app/ai_service's
+# venv — that one is app/ai_service/.venv (see .venv/ above).
+.venv-ci/

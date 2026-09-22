@@ -275,5 +275,136 @@ else
   bad "scripts/deploy/helm.sh's image repository computation changed unexpectedly"
 fi
 
+# ---- Phase 6: CI pipeline (.github/workflows/ci.yml, scripts/ci/) --------------------------
+
+# 31. versions.env: Phase 6 tool pins exist and are in the right shape
+for var in GITLEAKS_VERSION ACTIONLINT_VERSION; do
+  val="${!var:-}"
+  if [[ "$val" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "$var=$val"; else bad "$var is missing or not vX.Y.Z (got '$val')"; fi
+done
+for var in PIP_AUDIT_VERSION YAMLLINT_VERSION; do
+  val="${!var:-}"
+  if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "$var=$val"; else bad "$var is missing or not X.Y.Z without a leading v (got '$val')"; fi
+done
+
+# 32. install-tools.sh knows how to install the two new tools, and doctor.sh checks for them
+if grep -q 'install_gitleaks' scripts/bootstrap/install-tools.sh && grep -q 'install_actionlint' scripts/bootstrap/install-tools.sh; then
+  ok "scripts/bootstrap/install-tools.sh installs gitleaks and actionlint"
+else
+  bad "scripts/bootstrap/install-tools.sh must define install_gitleaks and install_actionlint"
+fi
+if grep -qE 'for t in k3d kubectl helm gitleaks actionlint' scripts/bootstrap/doctor.sh; then
+  ok "doctor.sh checks gitleaks and actionlint alongside k3d/kubectl/helm"
+else
+  bad "doctor.sh's tool-version loop must include gitleaks and actionlint"
+fi
+
+# 33. scripts/ci/*.sh exist (executability and shell syntax are already covered by checks 1-2)
+for f in secrets-scan.sh deps-audit.sh workflow-lint.sh; do
+  if [[ -f "scripts/ci/$f" ]]; then ok "scripts/ci/$f exists"; else bad "missing scripts/ci/$f"; fi
+done
+
+# 34. .yamllint.yml exists and relaxes line-length (GitHub Actions YAML routinely exceeds 80 cols)
+if [[ -f .yamllint.yml ]] && grep -q 'line-length' .yamllint.yml; then
+  ok ".yamllint.yml exists and configures line-length"
+else
+  bad ".yamllint.yml must exist and configure the line-length rule"
+fi
+
+# 35. .venv-ci (the throwaway venv scripts/ci/*.sh create) is gitignored
+if grep -qxF '.venv-ci/' .gitignore; then ok ".venv-ci/ is gitignored"; else bad ".gitignore must exclude .venv-ci/"; fi
+
+# 36. scripts/build/image.sh gained a publish subcommand (GHCR) without touching push (local registry)
+if grep -q 'cmd_publish' scripts/build/image.sh && grep -q 'publish) cmd_publish' scripts/build/image.sh; then
+  ok "scripts/build/image.sh dispatches 'publish' to cmd_publish"
+else
+  bad "scripts/build/image.sh must add a 'publish' subcommand (cmd_publish)"
+fi
+if grep -q 'cmd_push' scripts/build/image.sh && grep -q 'REGISTRY_HOST' scripts/build/image.sh; then
+  ok "scripts/build/image.sh still pushes to the local registry unchanged (cmd_push/REGISTRY_HOST)"
+else
+  bad "scripts/build/image.sh's existing local-registry push (cmd_push) must be unchanged"
+fi
+if grep -q "tr '\[:upper:\]' '\[:lower:\]'" scripts/build/image.sh; then
+  ok "scripts/build/image.sh lowercases the GHCR owner/repo (GHCR requires a lowercase path)"
+else
+  bad "scripts/build/image.sh's cmd_publish must lowercase the owner/repo before building the GHCR image ref"
+fi
+
+# 37. Makefile: new Phase 6 targets exist and route to the right script
+for tgt in ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify image-publish; do
+  if grep -qE "^${tgt}:" Makefile; then ok "Makefile target: $tgt"; else bad "Makefile is missing target: $tgt"; fi
+done
+# shellcheck disable=SC2016
+if grep -q 'install-tools.sh \$(ARGS)' Makefile; then
+  ok "make tools-install passes through ARGS (for --only gitleaks / --only actionlint)"
+else
+  bad "Makefile's tools-install target must pass \$(ARGS) to install-tools.sh"
+fi
+if grep -q 'scripts/ci/\*\.sh' Makefile; then
+  ok "make lint shellchecks scripts/ci/*.sh too"
+else
+  bad "Makefile's lint target must include scripts/ci/*.sh"
+fi
+
+# 38. .github/workflows/ci.yml exists and is valid YAML
+WF=".github/workflows/ci.yml"
+if [[ -f "$WF" ]]; then
+  ok "$WF exists"
+  if have python3 && python3 -c "import yaml; yaml.safe_load(open('$WF'))" 2>/tmp/ci_yaml_check.err; then
+    ok "$WF is valid YAML"
+  else
+    bad "$WF is not valid YAML: $(cat /tmp/ci_yaml_check.err 2>/dev/null)"
+  fi
+else
+  bad "missing $WF"
+fi
+
+# 39. The workflow defines every job the pipeline is supposed to have, and nothing scope-creeps
+# into Phase 7/8/15/18 (signing, gitops commit, Argo CD, canary, post-deploy verification).
+if [[ -f "$WF" ]]; then
+  for job in lint-and-test secrets-scan deps-audit workflow-lint build-scan-deploy publish; do
+    if grep -qE "^  ${job}:" "$WF"; then ok "$WF defines job: $job"; else bad "$WF is missing job: $job"; fi
+  done
+  # Comment lines may legitimately explain what is deliberately NOT here (see the file header);
+  # only real content (job/step definitions) counts as scope creep.
+  out_of_scope="$(grep -vE '^\s*#' "$WF" | grep -inE 'cosign|argo-?cd|argo ?rollouts|gitops|sealed-?secret' || true)"
+  if [[ -z "$out_of_scope" ]]; then
+    ok "$WF stays inside Phase 6's scope (no signing/GitOps/Argo/canary references)"
+  else
+    bad "$WF references something out of Phase 6's scope (belongs to a later phase): $out_of_scope"
+  fi
+fi
+
+# 40. publish only runs on a push to main, and only after build-scan-deploy
+if [[ -f "$WF" ]]; then
+  if grep -A3 "^  publish:" "$WF" | grep -q "needs: \[build-scan-deploy\]"; then
+    ok "publish job needs build-scan-deploy"
+  else
+    bad "publish job must declare 'needs: [build-scan-deploy]'"
+  fi
+  if grep -A8 "^  publish:" "$WF" | grep -q "refs/heads/main"; then
+    ok "publish job is gated to the main branch"
+  else
+    bad "publish job must be gated with an 'if' on refs/heads/main"
+  fi
+fi
+
+# 41. Every heavy/scoped step in the workflow calls a make target that also exists locally —
+# nothing here is logic that only runs in CI and was never run or reviewed locally.
+if [[ -f "$WF" ]]; then
+  missing=""
+  for tgt in lint test app-install app-check ci-secrets-scan ci-deps-audit ci-workflow-lint \
+    tools-install cluster-up image-build image-check image-scan image-sbom image-push \
+    helm-lint helm-apply-dev helm-smoke-dev cluster-down image-publish; do
+    grep -qE "make ${tgt}\b" "$WF" || missing="$missing $tgt"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "every Phase 6 workflow step calls a make target that also exists for local use"
+  else
+    bad "$WF is missing a call to these make targets, or the target no longer exists:$missing"
+  fi
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

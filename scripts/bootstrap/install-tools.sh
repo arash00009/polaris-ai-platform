@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # scripts/bootstrap/install-tools.sh
-# Install pinned versions of k3d, kubectl and helm without sudo.
+# Install pinned versions of k3d, kubectl, helm, gitleaks and actionlint without sudo.
 # Every download is verified against the checksum the project publishes.
 #
-# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm] [--force]
+# gitleaks and actionlint (Phase 6) are local-dev conveniences too — the CI workflow installs
+# its own copies the same way, in the runner, since a GitHub-hosted runner starts from nothing
+# every time. This script is the one place both paths share the version pins and the download
+# logic, so a version bump here is a version bump everywhere.
+#
+# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm|gitleaks|actionlint] [--force]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,7 +25,7 @@ usage() {
 Usage: $(basename "$0") [--prefix DIR] [--only k3d|kubectl|helm] [--force]
 
   --prefix DIR   install directory (default: \$HOME/.local/bin)
-  --only TOOL    install just one tool
+  --only TOOL    install just one tool (k3d, kubectl, helm, gitleaks, actionlint)
   --force        reinstall even if the pinned version is already present
 
 Pinned versions come from versions.env.
@@ -121,14 +126,54 @@ install_helm() {
   log_ok "helm installed to $PREFIX/helm"
 }
 
+# gitleaks names its Linux amd64 asset "x64", not "amd64" like k3d/kubectl/helm.
+GITLEAKS_ARCH="$ARCH"
+[[ "$GITLEAKS_ARCH" == "amd64" ]] && GITLEAKS_ARCH="x64"
+
+install_gitleaks() {
+  needs_install gitleaks "$GITLEAKS_VERSION" || return 0
+  local ver="${GITLEAKS_VERSION#v}"
+  local base="https://github.com/gitleaks/gitleaks/releases/download/${GITLEAKS_VERSION}"
+  local asset="gitleaks_${ver}_linux_${GITLEAKS_ARCH}.tar.gz"
+  log_info "Installing gitleaks ${GITLEAKS_VERSION} (${GITLEAKS_ARCH})"
+  download "$base/$asset" "$TMP/$asset"
+  download "$base/gitleaks_${ver}_checksums.txt" "$TMP/gitleaks-checksums.txt"
+  local expected
+  expected="$(awk -v a="$asset" '$2 == a {print $1; exit}' "$TMP/gitleaks-checksums.txt")"
+  [[ -n "$expected" ]] || die "No checksum entry for $asset in gitleaks checksums.txt"
+  verify_sha256 "$TMP/$asset" "$expected"
+  tar -xzf "$TMP/$asset" -C "$TMP" gitleaks
+  install -m 0755 "$TMP/gitleaks" "$PREFIX/gitleaks"
+  log_ok "gitleaks installed to $PREFIX/gitleaks"
+}
+
+install_actionlint() {
+  needs_install actionlint "$ACTIONLINT_VERSION" || return 0
+  local ver="${ACTIONLINT_VERSION#v}"
+  local base="https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}"
+  local asset="actionlint_${ver}_linux_${ARCH}.tar.gz"
+  log_info "Installing actionlint ${ACTIONLINT_VERSION} (${ARCH})"
+  download "$base/$asset" "$TMP/$asset"
+  download "$base/actionlint_${ver}_checksums.txt" "$TMP/actionlint-checksums.txt"
+  local expected
+  expected="$(awk -v a="$asset" '$2 == a {print $1; exit}' "$TMP/actionlint-checksums.txt")"
+  [[ -n "$expected" ]] || die "No checksum entry for $asset in actionlint checksums.txt"
+  verify_sha256 "$TMP/$asset" "$expected"
+  tar -xzf "$TMP/$asset" -C "$TMP" actionlint
+  install -m 0755 "$TMP/actionlint" "$PREFIX/actionlint"
+  log_ok "actionlint installed to $PREFIX/actionlint"
+}
+
 case "$ONLY" in
-  ""|k3d|kubectl|helm) ;;
-  *) die "--only must be one of: k3d, kubectl, helm" ;;
+  ""|k3d|kubectl|helm|gitleaks|actionlint) ;;
+  *) die "--only must be one of: k3d, kubectl, helm, gitleaks, actionlint" ;;
 esac
 
 install_k3d
 install_kubectl
 install_helm
+install_gitleaks
+install_actionlint
 
 if [[ ":$ORIGINAL_PATH:" != *":$PREFIX:"* ]]; then
   log_warn "$PREFIX is not on your PATH. Add it permanently with:"

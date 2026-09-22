@@ -7,26 +7,27 @@ PY      := $(VENV)/bin/python
 
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
 	app-install app-lint app-test app-check app-run \
-	image-info image-pin image-build image-run image-check image-push image-scan image-sbom \
+	image-info image-pin image-build image-run image-check image-push image-scan image-sbom image-publish \
 	deploy-info deploy-apply deploy-status deploy-logs deploy-smoke deploy-delete \
 	helm-lint helm-template-dev helm-template-staging helm-template-prod \
 	helm-apply-dev helm-apply-staging helm-apply-prod \
 	helm-status-dev helm-status-staging helm-status-prod \
 	helm-logs-dev helm-logs-staging helm-logs-prod \
 	helm-smoke-dev helm-smoke-staging helm-smoke-prod \
-	helm-uninstall-dev helm-uninstall-staging helm-uninstall-prod
+	helm-uninstall-dev helm-uninstall-staging helm-uninstall-prod \
+	ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
 
-tools-install: ## Install pinned k3d, kubectl and helm into ~/.local/bin (no sudo)
-	./scripts/bootstrap/install-tools.sh
+tools-install: ## Install pinned k3d, kubectl, helm, gitleaks and actionlint into ~/.local/bin (no sudo). Add ARGS="--only gitleaks" etc. to install just one
+	./scripts/bootstrap/install-tools.sh $(ARGS)
 
 doctor: ## Check that this machine can run the platform
 	./scripts/bootstrap/doctor.sh
 
 lint: ## Lint all shell scripts with shellcheck
-	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh tests/bootstrap/*.sh
+	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh scripts/ci/*.sh tests/bootstrap/*.sh
 
 test: ## Run static tests (no Docker or cluster needed)
 	./tests/bootstrap/test_static.sh
@@ -92,6 +93,9 @@ image-scan: ## Scan the image for vulnerabilities with Trivy (fails on fixable H
 
 image-sbom: ## Write a CycloneDX software bill of materials for the image to artifacts/
 	./scripts/build/image.sh sbom
+
+image-publish: ## Retag the already-built image and push it to GHCR (needs: docker login ghcr.io first)
+	./scripts/build/image.sh publish
 
 deploy-info: ## Show the image tag, namespace and context 'make deploy-apply' would use
 	./scripts/deploy/app.sh info
@@ -170,3 +174,18 @@ helm-uninstall-staging: ## Remove the staging release (keeps the polaris-staging
 
 helm-uninstall-prod: ## Remove the prod release (keeps the polaris-prod namespace)
 	./scripts/deploy/helm.sh uninstall prod
+
+# --- Phase 6: CI pipeline (.github/workflows/ci.yml runs these same targets) -------------------
+# Deliberately just wrappers around scripts/ci/*.sh, so "what CI runs" and "what you can run
+# locally before pushing" are the same command, not two things that can drift apart.
+
+ci-secrets-scan: ## Scan the repository for committed secrets with gitleaks (needs: make tools-install)
+	./scripts/ci/secrets-scan.sh
+
+ci-deps-audit: ## Audit app/ai_service's pinned runtime dependencies with pip-audit
+	./scripts/ci/deps-audit.sh
+
+ci-workflow-lint: ## Lint .github/workflows/*.yml with yamllint and actionlint (needs: make tools-install)
+	./scripts/ci/workflow-lint.sh
+
+ci-verify: lint test ci-secrets-scan ci-deps-audit ci-workflow-lint ## Everything CI checks before it needs Docker or a cluster

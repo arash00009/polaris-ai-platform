@@ -1,0 +1,16 @@
+# .yamllint.yml — used by scripts/ci/workflow-lint.sh (make ci-workflow-lint) against
+# .github/workflows/*.yml. Relaxed from yamllint's defaults for GitHub Actions YAML specifically:
+# 80-column line length is routinely broken by run: blocks and long action refs, and GitHub's own
+# examples never start a workflow file with a "---" document marker.
+extends: default
+
+rules:
+  line-length:
+    max: 140
+  document-start: disable
+  truthy:
+    # GitHub Actions' own "on:" keyword is a YAML 1.1 boolean ("on" -> true) unless quoted, which
+    # every published example leaves unquoted. Accept it rather than fighting GitHub's own style.
+    check-keys: false
+  comments:
+    min-spaces-from-content: 1

@@ -1,0 +1,201 @@
+name: CI
+
+# Phase 6 (docs/architecture.md, Section 8 "CI/CD flow" — the pre-merge loop). Everything in this
+# file runs on every push and pull request; only the last job (publish) makes a branch decision,
+# and it only runs on a push to main. What happens after an image reaches GHCR — a commit to the
+# separate gitops repository, Argo CD syncing it, an Argo Rollouts canary, a post-deploy
+# verification job — is Phases 7/8/18 and does not belong in this file (docs/adr/README.md,
+# ADR-24).
+#
+# Every step below calls a `make <target>` that also exists for local use (see README.md's
+# Quickstart). Nothing here is CI-only logic: what this workflow checks is exactly what running
+# the same commands locally, before pushing, would have checked.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+# A new push to the same branch or pull request cancels the run already in flight for it: only
+# the latest commit's result is worth runner time.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---- fast checks: no Docker, no cluster -----------------------------------------------------
+
+  lint-and-test:
+    name: Lint and test (shell + AI service)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # tests/bootstrap/test_static.sh parses values-*.yaml with PyYAML; ubuntu-latest's system
+      # Python does not carry it by default.
+      - name: Install PyYAML for the static tests
+        run: python3 -m pip install --quiet pyyaml
+      - name: Shell scripts (shellcheck)
+        run: make lint
+      - name: Static tests (no Docker or cluster needed)
+        run: make test
+      - name: AI service — install pinned dependencies
+        run: make app-install
+      - name: AI service — lint and unit tests (95% coverage gate)
+        run: make app-check
+
+  secrets-scan:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a secret committed and later removed in a follow-up commit is still
+          # caught. A shallow, single-commit checkout would only see the working tree.
+          fetch-depth: 0
+      - name: Install gitleaks (pinned in versions.env)
+        run: ./scripts/bootstrap/install-tools.sh --only gitleaks
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make ci-secrets-scan
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: artifacts/gitleaks-report.json
+          if-no-files-found: ignore
+
+  deps-audit:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: make ci-deps-audit
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: artifacts/pip-audit-report.json
+          if-no-files-found: ignore
+
+  workflow-lint:
+    name: Workflow lint (yamllint + actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install actionlint (pinned in versions.env)
+        run: ./scripts/bootstrap/install-tools.sh --only actionlint
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: make ci-workflow-lint
+
+  # ---- heavy job: needs Docker and creates its own throwaway Kubernetes cluster ----------------
+
+  build-scan-deploy:
+    name: Build, scan, SBOM, ephemeral-cluster deploy
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, secrets-scan, deps-audit, workflow-lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      # k3d, kubectl and helm are installed even though this job only needs them (gitleaks and
+      # actionlint are skipped by the other jobs' --only flag) — one full `make tools-install`
+      # is simpler than three separate --only calls, at the cost of ~15 MB of unused download.
+      - name: Install k3d, kubectl and helm (pinned in versions.env)
+        run: make tools-install
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The runner creates its OWN cluster from the exact same deploy/k3d/cluster.yaml a
+      # developer's machine uses (docs/architecture.md, "the two verification loops"): this is
+      # not a shared, long-lived cluster, and nothing here can affect a real deployment. It is
+      # deleted again at the end of the job either way.
+      - name: Create the ephemeral k3d cluster
+        run: make cluster-up
+
+      - name: Build the image
+        run: make image-build
+      - name: Hardened-container check (non-root, probes, contract, JSON logs, clean shutdown)
+        run: make image-check
+      - name: Trivy scan (fails on fixable HIGH/CRITICAL — see docs/security/image-scan.md)
+        run: make image-scan
+      - name: SBOM (CycloneDX)
+        run: make image-sbom
+      - name: Push the image to the ephemeral cluster's own local registry
+        run: make image-push
+
+      - name: helm lint (structure check, all three values files)
+        run: make helm-lint
+      # Only polaris-dev is deployed and smoke-tested here — docs/architecture.md's roadmap calls
+      # for "ephemeral-cluster deploy validation", not a full three-environment run on every push.
+      # staging/prod get the same chart and the same templates; what CI proves is "this chart
+      # deploys and the API works", the same claim Phase 5's target-machine verification made for
+      # all three, not a re-run of that claim for staging/prod on every commit.
+      - name: Deploy to polaris-dev in the ephemeral cluster
+        run: make helm-apply-dev
+      - name: Smoke test through Traefik (/healthz, /readyz, /v1/chat)
+        run: make helm-smoke-dev
+
+      # The image that was just built, checked and scanned is saved here and re-loaded by the
+      # publish job below — never rebuilt — so what reaches GHCR is byte-for-byte what this job
+      # already verified, not a second, unverified build of the same commit.
+      - name: Save the verified image for the publish job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p artifacts
+          mapfile -t images < <(docker images --filter 'reference=localhost:5000/polaris/ai-service' --format '{{.Repository}}:{{.Tag}}')
+          docker save --output artifacts/ci-image.tar "${images[@]}"
+      - name: Upload the verified image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-image
+          path: artifacts/ci-image.tar
+
+      - name: Upload scan and SBOM reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-reports
+          path: |
+            artifacts/trivy-*.json
+            artifacts/sbom-*.cdx.json
+          if-no-files-found: ignore
+
+      - name: Tear down the ephemeral cluster
+        if: always()
+        run: make cluster-down || true
+
+  # ---- publish: main branch only, after every check above has passed ---------------------------
+
+  publish:
+    name: Publish to GHCR (main only)
+    runs-on: ubuntu-latest
+    needs: [build-scan-deploy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-image
+          path: artifacts
+      - name: Load the image build-scan-deploy already verified
+        run: docker load --input artifacts/ci-image.tar
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Publish (retag + push, no rebuild)
+        run: make image-publish

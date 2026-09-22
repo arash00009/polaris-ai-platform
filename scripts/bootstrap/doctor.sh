@@ -139,7 +139,7 @@ else
   fail "docker not found. See docs/deployment.md (Docker Engine install)."
 fi
 
-for t in k3d kubectl helm; do
+for t in k3d kubectl helm gitleaks actionlint; do
   want_var="$(printf '%s' "$t" | tr '[:lower:]' '[:upper:]')_VERSION"
   want="${!want_var}"
   if ! have "$t"; then

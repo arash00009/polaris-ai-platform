@@ -43,7 +43,23 @@ load_versions() {
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # Print the first semantic version (vX.Y.Z) a tool reports, or nothing.
+# gitleaks and actionlint print their version without a leading "v" (e.g. "8.30.0"), unlike
+# k3d/kubectl/helm; one is added back so every pin in versions.env can be compared the same way.
 tool_version() {
+  case "$1" in
+    gitleaks|actionlint)
+      local raw
+      raw="$(
+        case "$1" in
+          gitleaks)   gitleaks version 2>/dev/null ;;
+          actionlint) actionlint -version 2>/dev/null | head -n1 ;;
+        esac
+      )"
+      [[ -n "$raw" ]] || return 0
+      printf 'v%s' "$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$raw" | head -n1)"
+      return 0
+      ;;
+  esac
   {
     case "$1" in
       k3d)     k3d version 2>/dev/null | head -n1 ;;
