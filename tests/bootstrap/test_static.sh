@@ -489,5 +489,19 @@ else
   bad "Makefile's lint target must include scripts/verify/*.sh"
 fi
 
+# 50. deployment.yaml carries a checksum/config annotation derived from configmap.yaml, so a
+# ConfigMap-only value change (e.g. `helm upgrade --set config.X=...`) forces a new rollout
+# instead of silently leaving the running pods on their old environment. Discovered missing
+# during Phase 7's first real deliberate-failure test (all six verify checks kept passing
+# because no pod ever restarted) -- see ADR-25 and docs/troubleshooting.md.
+if [[ -f "$DTPL" ]] \
+  && grep -q 'checksum/config:' "$DTPL" \
+  && grep -q 'configmap.yaml' "$DTPL" \
+  && grep -q 'sha256sum' "$DTPL"; then
+  ok "$DTPL carries a checksum/config annotation derived from configmap.yaml"
+else
+  bad "$DTPL must annotate its pod template with a checksum/config hash of configmap.yaml (see ADR-25), or a ConfigMap-only change never triggers a rollout"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

@@ -19,6 +19,15 @@ spec:
       {{- include "ai-platform.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        # Forces a new rollout whenever templates/configmap.yaml's rendered content changes --
+        # without this, envFrom: configMapRef below only points at a ConfigMap *by name*, so a
+        # `helm upgrade --set config.X=...` changes the ConfigMap's data but the Deployment's own
+        # PodTemplateSpec hash stays the same, and Kubernetes never creates a new ReplicaSet. The
+        # running pods then keep their original environment indefinitely. Standard Helm pattern.
+        # Discovered missing during Phase 7's first real deliberate-failure test -- see ADR-25 and
+        # docs/troubleshooting.md.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "ai-platform.labels" . | nindent 8 }}
     spec:
