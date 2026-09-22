@@ -312,7 +312,7 @@ else
 fi
 
 # 35. .venv-ci (the throwaway venv scripts/ci/*.sh create) is gitignored
-if grep -qxF '.venv-ci/' .gitignore; then ok ".venv-ci/ is gitignored"; else bad ".gitignore must exclude .venv-ci/"; fi
+if grep -qxE '/?\.venv-ci/' .gitignore; then ok ".venv-ci/ is gitignored"; else bad ".gitignore must exclude .venv-ci/"; fi
 
 # 36. scripts/build/image.sh gained a publish subcommand (GHCR) without touching push (local registry)
 if grep -q 'cmd_publish' scripts/build/image.sh && grep -q 'publish) cmd_publish' scripts/build/image.sh; then
