@@ -7,7 +7,8 @@ PY      := $(VENV)/bin/python
 
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
 	app-install app-lint app-test app-check app-run \
-	image-info image-pin image-build image-run image-check image-push image-scan image-sbom
+	image-info image-pin image-build image-run image-check image-push image-scan image-sbom \
+	deploy-info deploy-apply deploy-status deploy-logs deploy-smoke deploy-delete
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -19,7 +20,7 @@ doctor: ## Check that this machine can run the platform
 	./scripts/bootstrap/doctor.sh
 
 lint: ## Lint all shell scripts with shellcheck
-	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh tests/bootstrap/*.sh
+	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh tests/bootstrap/*.sh
 
 test: ## Run static tests (no Docker or cluster needed)
 	./tests/bootstrap/test_static.sh
@@ -85,3 +86,21 @@ image-scan: ## Scan the image for vulnerabilities with Trivy (fails on fixable H
 
 image-sbom: ## Write a CycloneDX software bill of materials for the image to artifacts/
 	./scripts/build/image.sh sbom
+
+deploy-info: ## Show the image tag, namespace and context 'make deploy-apply' would use
+	./scripts/deploy/app.sh info
+
+deploy-apply: ## Deploy ai-service to polaris-dev (needs: make cluster-up, make image-build, make image-push)
+	./scripts/deploy/app.sh apply
+
+deploy-status: ## Show ai-service pods, rollout status and related resources
+	./scripts/deploy/app.sh status
+
+deploy-logs: ## Tail the ai-service pods' JSON logs (add ARGS=--follow to keep streaming)
+	./scripts/deploy/app.sh logs $(ARGS)
+
+deploy-smoke: ## Call the deployed ai-service through Traefik and check the /v1/chat contract
+	./scripts/deploy/app.sh smoke
+
+deploy-delete: ## Remove the ai-service workload from the cluster (keeps the polaris-dev namespace)
+	./scripts/deploy/app.sh delete

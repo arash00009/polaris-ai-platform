@@ -1,0 +1,103 @@
+# deploy/k8s/ai-service/deployment.yaml — LOCAL: Deployment for the Phase 3 container image.
+#
+# __AI_SERVICE_IMAGE__ is substituted by scripts/deploy/app.sh with the immutable
+# registry.localhost:5000/polaris/ai-service:<version>-<git sha> tag before this file is applied;
+# it is never applied as written (the placeholder is not a valid image reference), and there is
+# no "latest" (ADR-19).
+#
+# securityContext mirrors the flags already verified in Phase 3 (`make image-run`,
+# `make image-check`): non-root uid/gid 10001, no capabilities, no privilege escalation,
+# read-only root filesystem, a small in-memory /tmp.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-service
+        app.kubernetes.io/part-of: polaris
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ai-service
+          image: __AI_SERVICE_IMAGE__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ai-service-config
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # Starting point only: the Phase 3 `docker run` figures (256Mi / 1 CPU limit), not
+          # measured under load. docs/component-qa.md and docs/deployment.md say so; Phase 9/11
+          # replace these with numbers from an actual load test.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: "1"
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          # The app starts in well under a second (Phase 3, `make image-check`); this budget
+          # (15 x 2s = 30s) is generous for a busy 6-CPU/10.7GB machine running three k3d nodes,
+          # not a measurement of a slow start.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 15
+          lifecycle:
+            preStop:
+              exec:
+                # The service does not flip /readyz to "not ready" while it shuts down (a known
+                # Phase 3 gap, docs/adr/README.md ADR-20). This sleep gives the Service time to
+                # remove the pod's Endpoint before SIGTERM, so a rollout is less likely to send a
+                # request to a pod that is already on its way out. It does not fix the gap; it
+                # narrows the window.
+                command: ["sh", "-c", "sleep 5"]
+      # 5s preStop + margin for uvicorn's own graceful shutdown (Phase 3 verified: SIGTERM as
+      # PID 1 exits 0 and logs "Application shutdown complete").
+      terminationGracePeriodSeconds: 15
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

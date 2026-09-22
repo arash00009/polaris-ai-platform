@@ -16,7 +16,8 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 1 | Local development platform (WSL2, Docker, k3d, local registry) | In progress — cluster and smoke test verified on the target machine; final re-run of `make doctor`, `make test` and `make smoke` after the latest fixes pending |
 | 2 | AI service (FastAPI, swappable model backend) | Done — verified on the target machine (2026-09-21): 87 unit tests at 99 % coverage, and the running service answered 200, 422, 404, 502 and 504 as designed. The real model backend is only tested against a fake transport until Phase 11 |
 | 3 | Containerization, Trivy, SBOM | Done (verified 2026-09-21) — 125 unit tests and 41 static checks pass; the 134 MB non-root image was built, checked (9/9), pushed to the local registry, scanned (0 CRITICAL, 44 HIGH, none with a fix, all recorded in `docs/security/image-scan.md`) and an SBOM was generated. Not done: image signing, review of MEDIUM/LOW findings |
-| 4–5 | Kubernetes manifests, Helm chart, multi-environment values | Planned |
+| 4 | Kubernetes manifests (Deployment, Service, Ingress, PDB, NetworkPolicy) | In progress — written and statically checked (64 checks); not yet applied to a cluster |
+| 5 | Helm chart, multi-environment values | Planned |
 | 6–7 | CI pipeline (GitHub Actions) and continuous verification | Planned |
 | 8 | GitOps with Argo CD (separate configuration repository) | Planned |
 | 9–10 | Observability: Prometheus, Loki, Tempo, Grafana, OpenTelemetry | Planned |
@@ -47,6 +48,10 @@ make app-run         # http://127.0.0.1:8000, POST /v1/chat, GET /healthz, GET /
 make image-build     # Phase 3: container image, tagged <version>-<git sha>
 make image-check     # start it and verify user, probes, contract, JSON logs, shutdown
 make image-scan      # Trivy scan; make image-sbom writes the SBOM
+
+make image-push      # push the image to the local registry (needed before deploy-apply)
+make deploy-apply    # Phase 4: Deployment, Service, Ingress, PDB, NetworkPolicy in polaris-dev
+make deploy-smoke    # /healthz, /readyz and /v1/chat through Traefik
 ```
 
 `make help` lists every target.
@@ -61,11 +66,13 @@ make image-scan      # Trivy scan; make image-sbom writes the SBOM
 │   └── ai_service/          # FastAPI service, ModelBackend interface, unit tests, Dockerfile
 ├── deploy/
 │   ├── k3d/cluster.yaml     # local cluster definition (k3s image pinned here)
-│   └── k8s-smoke/           # throwaway workload used by `make smoke`
+│   ├── k8s-smoke/           # throwaway workload used by `make smoke`
+│   └── k8s/ai-service/      # Phase 4 manifests: namespace, config, Deployment, Service, Ingress, PDB, NetworkPolicy
 ├── scripts/
 │   ├── lib/common.sh        # shared shell helpers
 │   ├── bootstrap/           # install-tools, doctor, cluster, smoke-test
-│   └── build/image.sh       # image build, check, push, scan and SBOM (Phase 3)
+│   ├── build/image.sh       # image build, check, push, scan and SBOM (Phase 3)
+│   └── deploy/app.sh        # apply, status, logs, smoke and delete for ai-service (Phase 4)
 ├── tests/bootstrap/         # static tests for the scripts and configuration
 └── docs/
     ├── architecture.md      # design, diagrams, technology choices, roadmap

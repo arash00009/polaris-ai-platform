@@ -118,3 +118,40 @@ Status of every row below: **built, run, pushed, scanned and SBOM-generated on t
 | 4. Scale | A scan takes seconds to a few minutes once the database is cached. In CI (Phase 6) the same script runs on every build. |
 | 5. Security | The scanner is part of the supply chain: in March 2026 Trivy releases 0.69.4 to 0.69.6 were malicious. The version is pinned, those versions are refused by `make test`, and the image can be pinned by digest. Cosign verification of the release is recommended and **not done**. A scan is a point-in-time statement about known vulnerabilities, not proof of safety. |
 | 6. Cloud | Registry-side scanning (ECR, ACR, GHCR with Dependabot), admission control that rejects unscanned or unsigned images (Phase 15). **Not done here.** |
+
+## Phase 4
+
+Status of every row below: **written and statically checked** (`tests/bootstrap/test_static.sh`, 64 checks). Not applied to a cluster by me; I have no cluster. Rows that depend on a real deployment are marked *(pending first apply)* until the target machine's outputs exist.
+
+### Deployment, Service, Ingress (`polaris-dev`)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Runs the Phase 3 image as a reproducible Kubernetes workload, reachable through the same Traefik ingress the platform already uses, in the namespace the architecture document calls a real environment (`docs/architecture.md` 4.3). |
+| 2. Why | Two replicas behind a Service and an Ingress is the smallest shape that proves rolling updates and load distribution work; a plain manifest (not Helm yet) keeps Phase 4 about "does it deploy" before Phase 5 asks "does it deploy to three environments without duplication" (ADR-22). |
+| 3. Failure | `scripts/deploy/app.sh apply` checks the image tag exists in the local registry before applying anything (a fast failure instead of `ImagePullBackOff`), then waits on `kubectl rollout status` and prints pod and event diagnostics if it times out. *(pending first apply)* |
+| 4. Scale | Stateless, so `replicas: 2` costs only RAM; a `PodDisruptionBudget` with `minAvailable: 1` keeps one pod up during a voluntary disruption. Resource requests/limits are the Phase 3 `docker run` numbers carried over as a starting estimate, not measured under load (Phase 9/11 replace them). |
+| 5. Security | Pod Security Admission `restricted` on the namespace; `securityContext` matches the Phase 3 run flags exactly (non-root uid/gid 10001, no capabilities, no privilege escalation, read-only root filesystem, `seccompProfile: RuntimeDefault`); `automountServiceAccountToken: false` (the service calls no Kubernetes API). **Not done:** no Secret yet (nothing needs one until Phase 11), no `ai-gateway` in front of the Service yet (Phase 12). |
+| 6. Cloud | The same manifests (parameterised by Helm in Phase 5) on EKS/AKS/GKE, behind a managed load balancer instead of a k3d port mapping. |
+
+### Probes wired to Kubernetes
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Turns the Phase 3 `/healthz`/`/readyz` endpoints into the two decisions Kubernetes actually makes: restart this container, or stop sending it traffic. |
+| 2. Why | `livenessProbe` and `readinessProbe` point at different paths on purpose (ADR-20); a `startupProbe` gives a generous, documented-as-generous budget for the first health check on a busy machine, rather than tuning `initialDelaySeconds` by guesswork. |
+| 3. Failure | A pod that never reports ready stays out of the Service's Endpoints (no ingress traffic), and a pod that fails liveness is restarted by the kubelet — neither requires the `NetworkPolicy` to be in place. *(pending first apply)* |
+| 4. Scale | Cheap, stateless HTTP checks; no change from Phase 3's numbers. |
+| 5. Security | Known, named gap carried over from Phase 3: the app does not flip `/readyz` to "not ready" on shutdown. A `preStop` sleep (5 s) plus a 15 s termination grace period narrows the traffic-during-shutdown race; it is a mitigation, not a fix (ADR-22). |
+| 6. Cloud | Same probe semantics on any managed Kubernetes; a service mesh could add outlier detection on top, not used here. |
+
+### PodDisruptionBudget and NetworkPolicy
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | A `PodDisruptionBudget` keeps at least one pod serving during a *voluntary* disruption (node drain, cluster upgrade). A `NetworkPolicy` restricts which pods may even open a connection to `ai-service`, independent of what the application itself would accept. |
+| 2. Why | `minAvailable: 1` is meaningful once `replicas: 2` exists, so it costs nothing to add now. Default-deny plus an explicit allow from `kube-system` (Traefik) is the smallest policy that still lets real traffic through; k3s enforces `NetworkPolicy` with an embedded controller, so this does not need a different CNI. |
+| 3. Failure | A `PodDisruptionBudget` failure mode is silent by design: `kubectl drain` simply waits or refuses, it does not error the workload. A `NetworkPolicy` failure mode is not silent: if it blocks more than intended (including, possibly, kubelet's own probe traffic), pods stop being Ready. `scripts/deploy/app.sh apply` applies it last and re-checks readiness for exactly this reason, and warns rather than leaving the operator to guess. *(pending first apply — this is the one part of Phase 4 I am least sure will work exactly as written)* |
+| 4. Scale | Both are namespace-scoped and cost nothing beyond the API objects themselves. |
+| 5. Security | The `NetworkPolicy` is the first place in this project where "which pods may talk to this one" is enforced by the platform instead of assumed. It does not cover egress (the service makes no outbound calls yet — Phase 11 changes that) and it is one namespace, not the default-deny-everywhere posture a real platform would want across all namespaces (Phase 15). |
+| 6. Cloud | Same primitives on any CNCF-conformant CNI; a managed cluster typically adds a cloud load balancer's own health checks on top of the `PodDisruptionBudget`. |

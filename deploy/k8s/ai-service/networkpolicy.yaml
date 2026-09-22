@@ -1,0 +1,48 @@
+# deploy/k8s/ai-service/networkpolicy.yaml — LOCAL: default-deny ingress, plus an explicit
+# allow from Traefik (kube-system, where k3s runs its bundled Traefik by default).
+#
+# k3s enforces NetworkPolicy out of the box through its own embedded network-policy controller
+# (built on kube-router's netpol module, separate from Flannel, which provides no NetworkPolicy
+# support by itself). No extra CNI is installed for this. Source: docs.k3s.io/networking/
+# networking-services and docs.k3s.io/cli/server (`--disable-network-policy`), checked 2026-09-22.
+#
+# Not run by me: I have no cluster to apply this to. The one real risk is that kubelet's liveness/
+# readiness/startup probes reach the pod from the node's own network, not from another pod — and
+# whether that traffic is exempted from an "Ingress" NetworkPolicy is implementation-specific.
+# scripts/deploy/app.sh applies this file LAST, after the Deployment is already rolled out and
+# healthy, and checks pod readiness again afterwards for exactly this reason. If pods stop being
+# Ready only after this file is applied, remove it (see docs/troubleshooting.md, Phase 4) — the
+# rest of the deployment does not depend on it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-service-default-deny
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-service-allow-ingress
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8000

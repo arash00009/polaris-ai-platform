@@ -25,6 +25,7 @@ Short records of significant decisions: what was chosen, why, and when to revisi
 | ADR-19 | **Container image**: multi-stage, `python:3.12-slim-trixie`, non-root uid 10001, no pip at runtime, exact pins with binary wheels only, immutable tag `<version>-<git sha>` and no `latest` | Small, reproducible, least-privilege image whose exact origin is always readable from its tag and labels | The base image digest is bumped, Python 3.13 is adopted, or a distroless base is evaluated (Phase 15) |
 | ADR-20 | **Probes and structured logs**: `/healthz` (liveness, no dependencies), `/readyz` (backend reachable), JSON logs with a field allow-list, request id in the service's own access line | Kubernetes needs two different answers; log pipelines need parseable lines; prompts must never leak into either | Phase 10 adds trace ids; Phase 11 tightens readiness against a real model server |
 | ADR-21 | **Scanner and SBOM**: Trivy 0.74.0 run as a container on a saved image tar (no Docker socket), gate on fixable HIGH/CRITICAL, CycloneDX SBOM, unfixed findings recorded in `docs/security/image-scan.md` | Reproducible without installing anything, and the scanner itself is treated as part of the supply chain | Phase 6 runs the same script in CI; Phase 15 adds signing and admission policy |
+| ADR-22 | **Raw Kubernetes manifests** (not Helm yet) for `ai-service` in namespace `polaris-dev`: PSA `restricted`, `securityContext` matching the Phase 3 run flags, a `preStop` sleep instead of a real shutdown-readiness fix, resource requests/limits carried over from `docker run` as an estimate, a `PodDisruptionBudget`, and a default-deny `NetworkPolicy` relying on k3s's bundled netpol controller | One namespace is enough to prove the manifests before Phase 5 parameterises three of them with Helm; every hardening flag already had to exist and be verified in Phase 3 | Phase 5 (Helm chart, `polaris-staging`/`polaris-prod`); Phase 9/11 replace the resource estimate with measurements |
 
 ## Records
 
@@ -136,6 +137,29 @@ Consequences: the first scan downloads the vulnerability database (hundreds of M
 Not done: verifying Trivy's release signature with cosign. The advisory describes how (`cosign verify` with the `aquasecurity` GitHub identity and checking Rekor timestamps); pinning by digest after that verification is the stronger control and is recommended before relying on the scanner in CI (Phase 6).
 
 Revisit when: Phase 6 (CI), Phase 15 (signing and admission control), or the scanner project changes ownership or release practice.
+
+### ADR-22: Kubernetes manifests for ai-service (raw, one namespace)
+
+Status: accepted. Written and statically checked (`tests/bootstrap/test_static.sh`); not yet applied to a cluster by me (see the Phase 4 guide for what the target machine verified).
+
+Context: the image from Phase 3 needs somewhere to run that matches how the platform is supposed to work — probes wired to Kubernetes, non-root enforced by the platform and not just by the image, a namespace that is one of the three environments the architecture document already names (`docs/architecture.md`, section 4.3; ADR-11). Phase 5 (Helm) is where three environments and reusable values arrive; Phase 4 has to prove the manifests work at all, in one namespace, before templating them.
+
+Decision:
+
+- **Namespace `polaris-dev` only.** The architecture document's three environments (`polaris-dev`, `polaris-staging`, `polaris-prod`) are namespaces in one cluster from the same resources; Phase 4 applies only the first. `deploy/k8s/ai-service/` holds plain YAML, not a Kustomize base or a Helm chart, so there is exactly one templating step to add in Phase 5, not two.
+- **Pod Security Admission: `restricted`** on the namespace (`docs/architecture.md`'s Security row: "NetworkPolicies, ResourceQuotas... Pod violates Pod Security restricted"). The Deployment's `securityContext` (`runAsNonRoot`, numeric `runAsUser`/`runAsGroup` 10001, `seccompProfile: RuntimeDefault`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem: true`) is the same restriction already verified by `make image-check` and `make image-run` in Phase 3, expressed as Kubernetes fields instead of `docker run` flags, so `restricted` should accept it without a second round of loosening flags to find the right set.
+- **Probes**: `livenessProbe`/`readinessProbe`/`startupProbe` point at `/healthz`/`/healthz`/`/readyz` from ADR-20. A `preStop` sleep (5 s) plus `terminationGracePeriodSeconds: 15` is added because the service does not flip `/readyz` to "not ready" while shutting down (a named Phase 3 gap): the sleep buys the Service time to drop the pod's Endpoint before SIGTERM. It narrows the race, it does not close it.
+- **Resources**: `requests`/`limits` start from the Phase 3 `docker run` numbers (256Mi/1 CPU limit) verbatim, labelled as an estimate in the manifest and in `docs/component-qa.md`. Real numbers come from a load test in Phase 9/11, not from this phase.
+- **`PodDisruptionBudget`** with `minAvailable: 1`, since `replicas: 2` makes it meaningful and it costs nothing to add now.
+- **`NetworkPolicy`**: default-deny ingress for the namespace, plus an explicit allow from `kube-system` (where k3s runs its bundled Traefik) to port 8000. k3s enforces `NetworkPolicy` out of the box through an embedded controller built on kube-router's netpol module (separate from Flannel, which has no NetworkPolicy support of its own); no extra CNI is installed. This is the one manifest I could not test without a cluster: `scripts/deploy/app.sh apply` applies it last, after the Deployment is already healthy, and re-checks pod readiness afterwards, because whether kubelet's own probe traffic (which originates from the node, not from another pod) is exempted from an "Ingress" policy is implementation-specific and I have not verified it either way.
+- **No `ai-gateway`.** The architecture document places a gateway in front of `ai-service` for auth, rate limits and quotas, but that component does not exist until Phase 12. The `Ingress` in Phase 4 routes straight to the `ai-service` Service.
+- **No Secret.** `POLARIS_BACKEND=mock` needs no credential. `POLARIS_OPENAI_API_KEY` is added as a Secret, referenced with `optional: true`, when Phase 11 wires a real model server — inventing an empty or placeholder Secret now would document a shape without a use for it.
+
+Alternatives: Kustomize (an extra concept for one namespace; Phase 5 goes straight to Helm, which the final deliverable list already names); Helm now (the multi-environment values that justify it do not exist until Phase 5); `hostNetwork`/`NodePort` instead of Ingress (skips Traefik, which is what production would use); no `NetworkPolicy` until Phase 15 (cheap to add now, and k3s enforces it without extra installation, so leaving it out would not save any real setup cost).
+
+Consequences: the Deployment's image tag is substituted by `scripts/deploy/app.sh`, not hand-edited, so the placeholder `__AI_SERVICE_IMAGE__` in `deployment.yaml` is never a valid reference by itself. Applying `networkpolicy.yaml` is a separate, later step in the same script specifically so a NetworkPolicy problem does not look like a Deployment problem.
+
+Revisit when: Phase 5 replaces these files with a Helm chart and adds `polaris-staging`/`polaris-prod`; Phase 9/11 replace the resource estimate with measurements; Phase 12 adds `ai-gateway` in front of the Service; Phase 15 reviews `NetworkPolicy` scope alongside admission control.
 
 ## Template for a new record
 

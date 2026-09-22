@@ -1,0 +1,15 @@
+# deploy/k8s/ai-service/poddisruptionbudget.yaml — LOCAL: keeps at least one pod up during a
+# voluntary disruption (node drain, cluster upgrade). Only matters with replicas > 1.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ai-service
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ai-service

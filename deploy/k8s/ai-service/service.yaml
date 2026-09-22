@@ -1,0 +1,16 @@
+# deploy/k8s/ai-service/service.yaml — LOCAL: stable ClusterIP in front of the ai-service pods.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-service
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  selector:
+    app.kubernetes.io/name: ai-service
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

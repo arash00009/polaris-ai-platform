@@ -1,0 +1,20 @@
+# deploy/k8s/ai-service/configmap.yaml — LOCAL: non-secret POLARIS_* settings.
+#
+# POLARIS_LOG_FORMAT is already "json" from the image itself (Dockerfile ENV, Phase 3); it is not
+# repeated here on purpose, so there is exactly one place that sets it. POLARIS_BACKEND stays
+# "mock" until Phase 11 wires a real model server behind POLARIS_BACKEND=openai_compat; changing
+# a value here does not need a new image, only `kubectl apply` and a rollout.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-service-config
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+data:
+  POLARIS_BACKEND: "mock"
+  POLARIS_LOG_LEVEL: "INFO"
+  POLARIS_READY_TIMEOUT_S: "2"
+  POLARIS_MOCK_MODEL_NAME: "mock-1"
+  POLARIS_MOCK_READY: "true"

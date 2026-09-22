@@ -231,7 +231,30 @@ make image-sbom      # CycloneDX SBOM in artifacts/
 
 **Scanner and SBOM.** Trivy runs as a container on a saved copy of the image (`docker save`), without the Docker socket. Reports and SBOMs land in `artifacts/` (git-ignored); the first scan downloads the vulnerability database into `artifacts/trivy-cache` (about four minutes on the reference machine; later scans reuse it). Findings that cannot be fixed yet are recorded in `docs/security/image-scan.md`.
 
-## 10. Run profiles (memory budget)
+## 10. Kubernetes deployment (Phase 4)
+
+The manifests are plain YAML under `deploy/k8s/ai-service/` (no Kustomize, no Helm yet — Phase 5 adds that), applied through `scripts/deploy/app.sh` via make targets. The cluster must be up (`make cluster-up`) and the image must already be pushed (`make image-build && make image-push`).
+
+```bash
+make deploy-info      # image tag, namespace and context that would be used
+make deploy-apply     # applies namespace, config, Deployment, Service, Ingress, PDB, then the NetworkPolicy last
+make deploy-status     # pods, rollout status, Service, Ingress, PDB, NetworkPolicy
+make deploy-logs       # tails JSON logs from all ai-service pods (ARGS=--follow to keep streaming)
+make deploy-smoke      # calls /healthz, /readyz and /v1/chat through Traefik and checks the contract
+make deploy-delete     # removes the ai-service workload (keeps the polaris-dev namespace)
+```
+
+**Namespace.** Everything lives in `polaris-dev`, one of the three environments the architecture document names (`docs/architecture.md` 4.3; ADR-11). Phase 5 is what adds `polaris-staging`/`polaris-prod` from the same resources, parameterised.
+
+**Image reference.** `scripts/deploy/app.sh` computes the same `<version>-<git sha>` tag as `scripts/build/image.sh` and substitutes it into `deployment.yaml`'s `__AI_SERVICE_IMAGE__` placeholder as `registry.localhost:5000/polaris/ai-service:<tag>` (the in-cluster name for the registry; `localhost:5000` from the host — same distinction as Phase 3). It refuses to apply a tag that has not been pushed.
+
+**Hardening.** Pod Security Admission `restricted` on the namespace; `securityContext` matches the already-verified Phase 3 `docker run`/`image-check` flags (non-root uid/gid 10001, no capabilities, no privilege escalation, read-only root filesystem). A `preStop` sleep plus a longer termination grace period narrows (does not close) the known gap that `/readyz` does not flip to "not ready" during shutdown.
+
+**NetworkPolicy.** Applied last, after the Deployment is confirmed healthy, because it is the one manifest that could not be tested without a cluster: whether kubelet's own probe traffic is exempted from a default-deny "Ingress" policy depends on the CNI. `make deploy-apply` re-checks pod readiness after applying it and warns (without failing the whole command) if pods stop being Ready — see `docs/troubleshooting.md`, Phase 4, and ADR-22 for the removal command.
+
+**Resource requests/limits** are the Phase 3 `docker run` numbers carried over as an estimate, not a measurement; `docs/component-qa.md` and this note both say so on purpose, until Phase 9/11 replace them with load-test numbers.
+
+## 11. Run profiles (memory budget)
 
 Introduced progressively as components are added. Estimates only; measured values replace them in Phases 9 and 11.
 
@@ -241,8 +264,9 @@ Introduced progressively as components are added. Estimates only; measured value
 | `obs` | core + observability stack | 4–6 GB |
 | `full` | obs + delivery tooling + model server + FinOps | 7–10 GB |
 
-## 11. Teardown
+## 12. Teardown
 
 ```bash
+make deploy-delete   # removes the ai-service workload (kubectl, before the cluster goes away)
 make cluster-down    # deletes the cluster and the registry container
 ```

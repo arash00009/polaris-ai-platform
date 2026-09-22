@@ -1,0 +1,23 @@
+# deploy/k8s/ai-service/ingress.yaml — LOCAL: routes ai.localhost through k3s's built-in Traefik.
+# There is no ai-gateway yet (Phase 12): Traefik forwards straight to the ai-service Service.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-service
+  namespace: polaris-dev
+  labels:
+    app.kubernetes.io/name: ai-service
+    app.kubernetes.io/part-of: polaris
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: ai.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-service
+                port:
+                  number: 80

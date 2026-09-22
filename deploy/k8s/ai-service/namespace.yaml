@@ -1,0 +1,23 @@
+# deploy/k8s/ai-service/namespace.yaml — LOCAL: the application environment for the AI service.
+#
+# Environments are namespaces in this one cluster (docs/architecture.md section 4.3, ADR-11):
+# polaris-dev, polaris-staging, polaris-prod, all from the same manifests/chart with different
+# values. Phase 4 (raw manifests) only ever applies polaris-dev. Phase 5 (Helm) is what adds
+# polaris-staging and polaris-prod, from this same set of resources parameterised by values —
+# not copies of this file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: polaris-dev
+  labels:
+    app.kubernetes.io/part-of: polaris
+    environment: dev
+    # Pod Security Admission: reject any pod that is not "restricted". This matches the run
+    # restrictions already verified in Phase 3 (`make image-run` / `make image-check`): non-root,
+    # no Linux capabilities, no privilege escalation, read-only root filesystem.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.34
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.34

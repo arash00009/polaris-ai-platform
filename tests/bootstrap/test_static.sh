@@ -131,5 +131,62 @@ else
   bad "$DI must exist and exclude .venv, tests and .env"
 fi
 
+# 15. Phase 4: the Kubernetes manifests all exist
+KDIR="deploy/k8s/ai-service"
+for f in namespace.yaml configmap.yaml deployment.yaml service.yaml ingress.yaml poddisruptionbudget.yaml networkpolicy.yaml; do
+  if [[ -f "$KDIR/$f" ]]; then ok "$KDIR/$f exists"; else bad "missing $KDIR/$f"; fi
+done
+
+# 16. deployment.yaml still carries the placeholder image (never a resolved tag, never :latest)
+DEP="$KDIR/deployment.yaml"
+if [[ -f "$DEP" ]]; then
+  if grep -q '__AI_SERVICE_IMAGE__' "$DEP"; then ok "deployment.yaml uses the __AI_SERVICE_IMAGE__ placeholder"; else bad "deployment.yaml must reference the __AI_SERVICE_IMAGE__ placeholder, substituted by scripts/deploy/app.sh"; fi
+  if grep -qE ':latest\b' "$DEP"; then bad "deployment.yaml uses a ':latest' tag"; else ok "no ':latest' tag in deployment.yaml"; fi
+
+  # 17. Pod-level and container-level hardening matches the Phase 3 run restrictions
+  for needle in 'runAsNonRoot: true' 'runAsUser: 10001' 'readOnlyRootFilesystem: true' 'allowPrivilegeEscalation: false' 'drop: \["ALL"\]'; do
+    if grep -qE -- "$needle" "$DEP"; then ok "deployment.yaml sets $needle"; else bad "deployment.yaml is missing '$needle'"; fi
+  done
+
+  # 18. Probes point at the Phase 3 endpoints
+  if grep -A2 'livenessProbe' "$DEP" | grep -q 'path: /healthz'; then ok "livenessProbe uses /healthz"; else bad "livenessProbe must use /healthz"; fi
+  if grep -A2 'readinessProbe' "$DEP" | grep -q 'path: /readyz'; then ok "readinessProbe uses /readyz"; else bad "readinessProbe must use /readyz"; fi
+
+  # 19. Resource limits are declared (values are a documented estimate, not enforced here)
+  if grep -q 'limits:' "$DEP" && grep -A3 'limits:' "$DEP" | grep -q 'memory:' && grep -A3 'limits:' "$DEP" | grep -q 'cpu:'; then
+    ok "deployment.yaml declares resources.limits (memory and cpu)"
+  else
+    bad "deployment.yaml must declare resources.limits.memory and resources.limits.cpu"
+  fi
+else
+  bad "cannot check deployment.yaml hardening: file is missing"
+fi
+
+# 20. namespace.yaml enforces the "restricted" Pod Security Standard
+NS="$KDIR/namespace.yaml"
+if [[ -f "$NS" ]] && grep -q 'pod-security.kubernetes.io/enforce: restricted' "$NS"; then
+  ok "namespace.yaml enforces the restricted Pod Security Standard"
+else
+  bad "$NS must set pod-security.kubernetes.io/enforce: restricted"
+fi
+
+# 21. ingress.yaml uses Traefik and does not collide with the Phase 1 smoke test's host
+ING="$KDIR/ingress.yaml"
+if [[ -f "$ING" ]] && grep -q 'ingressClassName: traefik' "$ING"; then ok "ingress.yaml uses ingressClassName: traefik"; else bad "$ING must set ingressClassName: traefik"; fi
+if [[ -f "$ING" ]] && grep -q 'host: whoami.localhost' "$ING"; then bad "$ING must not reuse whoami.localhost (Phase 1 smoke test)"; else ok "ingress.yaml host does not collide with the Phase 1 smoke test"; fi
+
+# 22. scripts/deploy/app.sh and the manifests agree on the namespace
+NS_FROM_SCRIPT="$(awk -F'"' '/^NAMESPACE="/{print $2; exit}' scripts/deploy/app.sh)"
+ns_mismatch=""
+for f in "$KDIR"/configmap.yaml "$KDIR"/deployment.yaml "$KDIR"/service.yaml "$KDIR"/ingress.yaml "$KDIR"/poddisruptionbudget.yaml "$KDIR"/networkpolicy.yaml; do
+  [[ -f "$f" ]] || continue
+  grep -q "namespace: $NS_FROM_SCRIPT" "$f" || ns_mismatch="$ns_mismatch $f"
+done
+if [[ -n "$NS_FROM_SCRIPT" && -z "$ns_mismatch" ]]; then
+  ok "scripts/deploy/app.sh and every manifest use the same namespace ($NS_FROM_SCRIPT)"
+else
+  bad "namespace mismatch between scripts/deploy/app.sh ('$NS_FROM_SCRIPT') and:$ns_mismatch"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]
