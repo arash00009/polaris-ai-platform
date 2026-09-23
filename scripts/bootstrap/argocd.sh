@@ -45,7 +45,14 @@ STATEFULSETS=(argocd-application-controller)
 
 CLUSTER_NAME="$(cluster_name_from_config "$CLUSTER_CONFIG")"
 CONTEXT="k3d-${CLUSTER_NAME}"
-ROLLOUT_TIMEOUT="${ARGOCD_ROLLOUT_TIMEOUT:-180s}"
+# 180s was the original default; raised to 900s (15 min) after a real target-machine run showed
+# the ~211MB quay.io/argoproj/argocd image taking up to 13m18s to pull on its first ever pull per
+# node on that network (kubectl describe pod / get events, Phase 8, docs/troubleshooting.md) --
+# every later pull of the same cached image took 1-7s. Three nodes can each need that same cold
+# pull in parallel on a shared home connection, so 180s was never realistic for a first install
+# here; it remains overridable either way (ARGOCD_ROLLOUT_TIMEOUT=60s for a fast, already-warm
+# cluster; higher still for a slower link than the one this was measured on).
+ROLLOUT_TIMEOUT="${ARGOCD_ROLLOUT_TIMEOUT:-900s}"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -83,7 +90,17 @@ cmd_install() {
   fetch_manifest
 
   kctl get namespace "$NAMESPACE" >/dev/null 2>&1 || kctl create namespace "$NAMESPACE"
-  kctl apply -n "$NAMESPACE" -f "$MANIFEST"
+  # --server-side (not a plain client-side 'kubectl apply -f'): the applicationsets.argoproj.io
+  # CRD in this manifest has a large enough OpenAPIV3Schema that client-side apply's
+  # kubectl.kubernetes.io/last-applied-configuration annotation exceeds the API server's
+  # 262144-byte annotation cap, and the CRD apply is rejected outright ("metadata.annotations:
+  # Too long: may not be more than 262144 bytes") while every other resource in the same file
+  # still applies fine -- a real failure found on a real cluster (see docs/troubleshooting.md,
+  # Phase 8). Server-side apply never writes that annotation, so it does not hit the limit.
+  # --force-conflicts: safe here even against a cluster where a previous plain 'apply' already
+  # created most of these resources under the client-side field manager -- it just reassigns
+  # field ownership to the server-side apply manager instead of erroring on it.
+  kctl apply -n "$NAMESPACE" --server-side --force-conflicts -f "$MANIFEST"
 
   log_info "waiting for ${#DEPLOYMENTS[@]} Deployments and ${#STATEFULSETS[@]} StatefulSet to roll out (timeout ${ROLLOUT_TIMEOUT} each)"
   local d

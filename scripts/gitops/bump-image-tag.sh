@@ -96,12 +96,25 @@ EOF
 log_ok "wrote $IMAGE_FILE"
 
 if [[ "$PUSH" -eq 1 ]]; then
-  ( cd "$GITOPS_DIR" \
-    && git add "environments/$ENV/image.yaml" \
-    && git commit -m "chore($ENV): bump image tag to $TAG" \
-    && git push ) \
-    || die "git commit/push failed in $GITOPS_DIR — is it a clean checkout with a remote configured?"
-  log_ok "committed and pushed. dev/staging sync automatically; prod needs an explicit manual sync — see the Phase 8 guide's 'Steg' on promotion."
+  git -C "$GITOPS_DIR" add "environments/$ENV/image.yaml" \
+    || die "git add failed in $GITOPS_DIR"
+  # Re-running this with --push when $ENV is already at $TAG (e.g. the same promotion command
+  # pasted twice) must not be treated as a failure: 'git commit' exits non-zero when there is
+  # nothing staged, which the old code let fall straight into the die() below with a misleading
+  # "is it a clean checkout" message even though the checkout was perfectly fine -- a real bug
+  # found on a real run (see docs/troubleshooting.md, Phase 8). Checking for staged changes first
+  # makes the no-op case an explicit, honest log line instead.
+  if git -C "$GITOPS_DIR" diff --cached --quiet -- "environments/$ENV/image.yaml"; then
+    log_ok "$ENV in $GITOPS_DIR is already at $TAG — nothing to commit or push."
+  else
+    if ! git -C "$GITOPS_DIR" commit -m "chore($ENV): bump image tag to $TAG"; then
+      die "git commit failed in $GITOPS_DIR — is it a clean checkout with a remote configured?"
+    fi
+    if ! git -C "$GITOPS_DIR" push; then
+      die "git push failed in $GITOPS_DIR — is the remote reachable and does the repository exist on GitHub?"
+    fi
+    log_ok "committed and pushed. dev/staging sync automatically; prod needs an explicit manual sync — see the Phase 8 guide's 'Steg' on promotion."
+  fi
 else
   log_info "not pushed (pass --push to commit and push in one step). Review first: cd $GITOPS_DIR && git diff"
 fi
