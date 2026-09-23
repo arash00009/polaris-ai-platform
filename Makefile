@@ -5,6 +5,10 @@ APP_DIR := app/ai_service
 VENV    := $(APP_DIR)/.venv
 PY      := $(VENV)/bin/python
 
+# Phase 8: polaris-gitops is a separate repository (ADR-08); default to a sibling checkout next
+# to this one (~/polaris/polaris-gitops next to ~/polaris/polaris-ai-platform).
+GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
+
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
 	app-install app-lint app-test app-check app-run \
 	image-info image-pin image-build image-run image-check image-push image-scan image-sbom image-publish \
@@ -16,7 +20,9 @@ PY      := $(VENV)/bin/python
 	helm-smoke-dev helm-smoke-staging helm-smoke-prod \
 	helm-uninstall-dev helm-uninstall-staging helm-uninstall-prod \
 	ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify \
-	verify-dev verify-staging verify-prod
+	verify-dev verify-staging verify-prod \
+	argocd-install argocd-status argocd-password argocd-uninstall gitops-bootstrap \
+	gitops-bump-dev gitops-bump-staging gitops-bump-prod
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -28,7 +34,7 @@ doctor: ## Check that this machine can run the platform
 	./scripts/bootstrap/doctor.sh
 
 lint: ## Lint all shell scripts with shellcheck
-	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh scripts/ci/*.sh scripts/verify/*.sh tests/bootstrap/*.sh
+	shellcheck -x -P SCRIPTDIR scripts/lib/*.sh scripts/bootstrap/*.sh scripts/build/*.sh scripts/deploy/*.sh scripts/ci/*.sh scripts/verify/*.sh scripts/gitops/*.sh tests/bootstrap/*.sh
 
 test: ## Run static tests (no Docker or cluster needed)
 	./tests/bootstrap/test_static.sh
@@ -203,3 +209,31 @@ verify-staging: ## Same checks as verify-dev, for the staging release
 
 verify-prod: ## Same checks as verify-dev, for the prod release
 	./scripts/verify/post-deploy.sh prod
+
+# --- Phase 8: GitOps with Argo CD (polaris-gitops is a separate repository, ADR-08/ADR-26) -----
+# argocd-* manage the control plane itself (its own 'argocd' namespace); gitops-* talk to the
+# separate polaris-gitops checkout that Argo CD is told to reconcile from.
+
+argocd-install: ## Install the pinned Argo CD release into the argocd namespace (needs: make cluster-up)
+	./scripts/bootstrap/argocd.sh install
+
+argocd-status: ## Show every Argo CD Application's sync/health status and the control plane's pods
+	./scripts/bootstrap/argocd.sh status
+
+argocd-password: ## Print the initial Argo CD admin password (admin / <password>)
+	./scripts/bootstrap/argocd.sh password
+
+argocd-uninstall: ## Remove Argo CD (the workloads it deployed to polaris-dev/-staging/-prod are untouched)
+	./scripts/bootstrap/argocd.sh uninstall
+
+gitops-bootstrap: ## Apply polaris-gitops' app-of-apps root Application, once (needs: make argocd-install; GITOPS_DIR defaults to a sibling checkout)
+	./scripts/gitops/bootstrap.sh $(GITOPS_DIR)
+
+gitops-bump-dev: ## Write the currently built image tag into polaris-gitops' environments/dev/image.yaml (needs: make image-build image-push; add ARGS=--push to commit+push)
+	./scripts/gitops/bump-image-tag.sh dev $(GITOPS_DIR) $(ARGS)
+
+gitops-bump-staging: ## Same, for staging
+	./scripts/gitops/bump-image-tag.sh staging $(GITOPS_DIR) $(ARGS)
+
+gitops-bump-prod: ## Same, for prod
+	./scripts/gitops/bump-image-tag.sh prod $(GITOPS_DIR) $(ARGS)

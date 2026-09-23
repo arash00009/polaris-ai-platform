@@ -20,7 +20,7 @@ An AI workload is an ordinary distributed service with three extra properties: i
 | 5 | Helm chart, multi-environment values | Done (verified 2026-09-22) — `helm/ai-platform/` renders `polaris-dev`/`-staging`/`-prod` from one chart; 88 static checks pass; `helm lint` passed for all three environments; `helm upgrade --install` succeeded for all three (`dev` 2/2, `staging` 2/2, `prod` 3/3 pods), NetworkPolicy held in all three, and `helm-smoke-*` passed `/healthz`, `/readyz` and `/v1/chat` for each. Three real gaps surfaced, all fixed: two during this phase's own verification, both in `polaris-dev` only — its pre-existing namespace (from Phase 4) had to be manually adopted into the Helm release once (`kubectl label`/`annotate`, ADR-23), and `make deploy-delete` must never be re-run once a namespace is Helm-managed, since it silently deletes the Helm-owned resources while `helm status` still reports the release as deployed (ADR-23, `docs/troubleshooting.md`) — and a third found later, by Phase 7's own testing: `deployment.yaml` had no `checksum/config` annotation, so a ConfigMap-only value change never triggered a rollout (fixed; see Phase 7's row and ADR-23/ADR-25). Not done: three environments in a real load-tested sense — resource requests/limits are still Phase 3's estimate |
 | 6 | CI pipeline (GitHub Actions) | Done (verified 2026-09-22) — `.github/workflows/ci.yml` ran end to end on GitHub Actions for real, all six jobs green: lint/test, secret scan (gitleaks), dependency audit (pip-audit), workflow lint (yamllint + actionlint), image build/check/scan/SBOM + ephemeral-k3d deploy validation (2m 1s), and GHCR publish. 127 static checks pass. Getting there took three pushes: the first real Actions run exposed a previously invisible bug — `scripts/build/image.sh` had never actually been committed since Phase 3, because an unanchored `.gitignore` pattern (`build/`, matching at any depth) silently excluded `scripts/build/`; fixing that surfaced a second, smaller regression in one of this project's own static tests. Both are fixed and documented in `docs/troubleshooting.md` and ADR-24 — a real lesson that local-only verification cannot catch a file that was never committed, only an independent checkout can. Not done: image signing (Phase 15) |
 | 7 | Continuous verification | Done (verified 2026-09-22) — `scripts/verify/post-deploy.sh` (`make verify-dev/-staging/-prod`): rollout status, health, readyz, a real non-empty AI answer and structured-log presence, all always checked and reported together (not fail-fast); pod resource metrics via k3s's bundled metrics-server are checked but only ever advisory. 140 static checks pass. The healthy path is verified for real against `dev`/`staging`/`prod`, all six checks passing with genuine metrics. The deliberate `POLARIS_MOCK_READY=false` failure-injection test found a real gap on its first run instead of just exercising the one it was written for: Phase 5's chart had no `checksum/config` annotation, so a ConfigMap-only value change never triggered a rollout — the injected change never reached a running pod (confirmed via identical pod names/ReplicaSet hash before and after), so nothing was actually unhealthy for the script to catch. Fixed (a `checksum/config` annotation, `helm/ai-platform/templates/deployment.yaml`) and re-confirmed for real: the same override against the fixed chart produced a genuine `FAIL rollout: ...` with a real, never-ready pod, and reverting produced a clean `PASS` again with yet another new pod — see `docs/troubleshooting.md` and ADR-25 for the full before/after evidence. Not done: a Kubernetes-Job production equivalent (documented, not built — ADR-25); real threshold-based analysis (needs Phase 9/10's Prometheus) |
-| 8 | GitOps with Argo CD (separate configuration repository) | Planned |
+| 8 | GitOps with Argo CD (separate configuration repository) | Written (not yet run for real) — `scripts/bootstrap/argocd.sh` installs the pinned, checksum-verified Argo CD `v3.5.2` (manifest downloaded and its sha256 verified for real in the sandbox, twice, in two separate sessions); a genuinely separate `polaris-gitops` repository holds an app-of-apps root plus one multi-source Helm `Application` per environment; `dev`/`staging` sync automatically (with self-heal), `prod` requires an explicit manual sync — the working stand-in for the roadmap's "manual approval" step, with the honest caveat (ADR-26) that nothing enforces the sync was actually reviewed. 166 static checks pass. Not done: any of this run against a live cluster — `make argocd-install`, `make gitops-bootstrap`, and the self-heal demonstration are the target-machine steps next; image-tag promotion into CI (deliberately left manual this phase, ADR-26) |
 | 9–10 | Observability: Prometheus, Loki, Tempo, Grafana, OpenTelemetry | Planned |
 | 11–14 | Model serving, gateway, FinOps, multi-tenancy | Planned |
 | 15–17 | Security hardening, AI governance, AI evaluation | Planned |
@@ -65,11 +65,20 @@ make ci-workflow-lint   # yamllint + actionlint against .github/workflows/
 make image-publish      # retag the built image and push it to GHCR (needs: docker login ghcr.io)
 
 make verify-dev         # Phase 7: rollout, health, readyz, a real AI answer, logs, metrics for the dev release
+
+make argocd-install      # Phase 8: install the pinned Argo CD release into the argocd namespace
+make gitops-bootstrap    # apply polaris-gitops' app-of-apps root Application (needs a polaris-gitops checkout, see below)
+make argocd-status       # every Application's sync/health status, and the control plane's pods
+make gitops-bump-dev     # write the currently built image tag into polaris-gitops' environments/dev/image.yaml
 ```
 
 `.github/workflows/ci.yml` runs these same `make` targets automatically on every push and pull request — see [docs/adr/README.md](docs/adr/README.md) (ADR-24).
 
 `make help` lists every target.
+
+## Two repositories (from Phase 8)
+
+Phase 8 (ADR-08, ADR-26) splits deployment configuration out of this repository into a second one, [`polaris-gitops`](https://github.com/arash00009/polaris-gitops), which Argo CD reconciles from directly. This repository still holds the application, its chart, its CI, and its docs — nothing here changed shape because of the split. `make gitops-bootstrap` and `make gitops-bump-<env>` above expect `polaris-gitops` cloned next to this repository (`GITOPS_DIR`, default: a sibling directory); see that repository's own `README.md` for its structure and the promotion model.
 
 ## Repository layout
 
@@ -95,7 +104,9 @@ make verify-dev         # Phase 7: rollout, health, readyz, a real AI answer, lo
 │   ├── deploy/app.sh        # apply, status, logs, smoke and delete for ai-service (Phase 4, raw manifests)
 │   ├── deploy/helm.sh       # lint, template, apply, status, logs, smoke, uninstall — per environment (Phase 5)
 │   ├── ci/                  # secrets-scan.sh, deps-audit.sh, workflow-lint.sh (Phase 6)
-│   └── verify/post-deploy.sh # rollout, health, readyz, AI answer, logs, metrics — per environment (Phase 7)
+│   ├── verify/post-deploy.sh # rollout, health, readyz, AI answer, logs, metrics — per environment (Phase 7)
+│   ├── bootstrap/argocd.sh  # install/status/password/uninstall for the Argo CD control plane (Phase 8)
+│   └── gitops/              # bootstrap.sh (apply polaris-gitops' root Application), bump-image-tag.sh (Phase 8)
 ├── tests/bootstrap/         # static tests for the scripts and configuration
 └── docs/
     ├── architecture.md      # design, diagrams, technology choices, roadmap

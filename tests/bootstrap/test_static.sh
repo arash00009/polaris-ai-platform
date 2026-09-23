@@ -503,5 +503,170 @@ else
   bad "$DTPL must annotate its pod template with a checksum/config hash of configmap.yaml (see ADR-25), or a ConfigMap-only change never triggers a rollout"
 fi
 
+# --- Phase 8: GitOps with Argo CD (scripts/bootstrap/argocd.sh, scripts/gitops/*.sh) -----------
+# polaris-gitops itself (ADR-08's repo split) is a *separate* repository, not part of this
+# checkout, so it cannot be statically tested here the way everything else in this file is —
+# checks 62-63 below validate a local sibling checkout only when one happens to be present, the
+# same best-effort pattern check 40-41 already use for an optional file.
+
+ARGOCD_SCRIPT="scripts/bootstrap/argocd.sh"
+
+# 51. versions.env: ARGOCD_VERSION is vX.Y.Z and ARGOCD_INSTALL_SHA256 is a real sha256 digest
+if [[ "${ARGOCD_VERSION:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "ARGOCD_VERSION=$ARGOCD_VERSION"; else bad "ARGOCD_VERSION is missing or not vX.Y.Z (got '${ARGOCD_VERSION:-}')"; fi
+if [[ "${ARGOCD_INSTALL_SHA256:-}" =~ ^[0-9a-f]{64}$ ]]; then ok "ARGOCD_INSTALL_SHA256 is a 64-character sha256 digest"; else bad "ARGOCD_INSTALL_SHA256 must be a sha256 digest, 64 hex characters, no 'sha256:' prefix (got '${ARGOCD_INSTALL_SHA256:-}')"; fi
+
+# 52. scripts/bootstrap/argocd.sh exists and implements all four subcommands the make targets need
+# (syntax/executable already covered by checks 1-2, which sweep scripts/ recursively)
+if [[ -f "$ARGOCD_SCRIPT" ]]; then
+  ok "$ARGOCD_SCRIPT exists"
+  missing=""
+  for fn in cmd_install cmd_status cmd_password cmd_uninstall; do
+    grep -q "^${fn}()" "$ARGOCD_SCRIPT" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$ARGOCD_SCRIPT implements install, status, password and uninstall"
+  else
+    bad "$ARGOCD_SCRIPT is missing:$missing"
+  fi
+  dispatch="$(awk '/^CMD=/,0' "$ARGOCD_SCRIPT")"
+  missing=""
+  for fn in cmd_install cmd_status cmd_password cmd_uninstall; do
+    grep -q "$fn" <<<"$dispatch" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$ARGOCD_SCRIPT's dispatch actually calls all four subcommands"
+  else
+    bad "$ARGOCD_SCRIPT defines but never dispatches to:$missing"
+  fi
+else
+  bad "$ARGOCD_SCRIPT is missing"
+fi
+
+# 53. argocd.sh's rollout-wait lists match what the pinned manifest actually creates: 6
+# Deployments and 1 StatefulSet, confirmed for real by downloading manifests/install.yaml for
+# ARGOCD_VERSION and parsing it with Python's yaml.safe_load_all in the sandbox (docs/adr/
+# README.md ADR-26). A textual pin, not a live check -- it catches the list silently drifting
+# out of sync with the comment above it, not a real future Argo CD release adding a workload.
+if [[ -f "$ARGOCD_SCRIPT" ]]; then
+  expected_deploy='DEPLOYMENTS=(argocd-applicationset-controller argocd-dex-server argocd-notifications-controller argocd-redis argocd-repo-server argocd-server)'
+  expected_sts='STATEFULSETS=(argocd-application-controller)'
+  actual_deploy="$(grep '^DEPLOYMENTS=' "$ARGOCD_SCRIPT" || true)"
+  actual_sts="$(grep '^STATEFULSETS=' "$ARGOCD_SCRIPT" || true)"
+  if [[ "$actual_deploy" == "$expected_deploy" && "$actual_sts" == "$expected_sts" ]]; then
+    ok "$ARGOCD_SCRIPT waits for exactly the Deployments/StatefulSet the pinned manifest creates"
+  else
+    bad "$ARGOCD_SCRIPT's DEPLOYMENTS/STATEFULSETS no longer match the verified list for $ARGOCD_VERSION (see ADR-26) -- re-verify against manifests/install.yaml before changing this"
+  fi
+fi
+
+# 54. Makefile: argocd-install/-status/-password/-uninstall exist and route to argocd.sh
+for sub in install status password uninstall; do
+  if grep -qE "^argocd-${sub}:" Makefile && grep -A1 "^argocd-${sub}:" Makefile | grep -q "argocd.sh ${sub}"; then
+    ok "Makefile target: argocd-$sub"
+  else
+    bad "Makefile is missing argocd-$sub, or it does not call argocd.sh $sub"
+  fi
+done
+
+# 55. Makefile: gitops-bootstrap and gitops-bump-{dev,staging,prod} exist and route to the right
+# scripts
+if grep -qE '^gitops-bootstrap:' Makefile && grep -A1 '^gitops-bootstrap:' Makefile | grep -q 'gitops/bootstrap.sh'; then
+  ok "Makefile target: gitops-bootstrap"
+else
+  bad "Makefile is missing gitops-bootstrap, or it does not call scripts/gitops/bootstrap.sh"
+fi
+for env in dev staging prod; do
+  if grep -qE "^gitops-bump-${env}:" Makefile && grep -A1 "^gitops-bump-${env}:" Makefile | grep -q "bump-image-tag.sh ${env}"; then
+    ok "Makefile target: gitops-bump-$env"
+  else
+    bad "Makefile is missing gitops-bump-$env, or it does not call scripts/gitops/bump-image-tag.sh $env"
+  fi
+done
+
+# 56. make lint shellchecks scripts/gitops/*.sh too
+if grep -q 'scripts/gitops/\*\.sh' Makefile; then
+  ok "make lint shellchecks scripts/gitops/*.sh too"
+else
+  bad "Makefile's lint target must include scripts/gitops/*.sh"
+fi
+
+# 57. bump-image-tag.sh refuses to write a tag that has not actually been pushed to the local
+# registry (same guard as scripts/deploy/helm.sh's need_pushed) -- otherwise it could point
+# polaris-gitops at an image that does not exist
+BUMP_SCRIPT="scripts/gitops/bump-image-tag.sh"
+if [[ -f "$BUMP_SCRIPT" ]] && grep -q 'need_pushed' "$BUMP_SCRIPT" && grep -q 'tags/list' "$BUMP_SCRIPT"; then
+  ok "$BUMP_SCRIPT checks the local registry before writing an image tag"
+else
+  bad "$BUMP_SCRIPT must verify the tag exists in the local registry before writing it (see scripts/deploy/helm.sh's need_pushed)"
+fi
+
+# 58. .github/workflows/ci.yml does not reference scripts/gitops -- this phase deliberately keeps
+# image-tag promotion a manual step, not a CI job (ADR-26); this check guards against that
+# boundary being crossed by accident later without a matching ADR update
+if [[ -f "$WF" ]]; then
+  if grep -q 'scripts/gitops' "$WF"; then
+    bad "$WF references scripts/gitops -- Phase 8 deliberately keeps image-tag promotion manual (ADR-26); if this is now wired into CI on purpose, update ADR-26 and this check together"
+  else
+    ok "$WF does not call scripts/gitops (image-tag promotion is still a manual step, ADR-26)"
+  fi
+fi
+
+# 59. README.md: Phase 8's status row is no longer "Planned"
+if grep -E '^\| 8 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 8 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 8 status row still says Planned (or the row is missing/reworded)"
+fi
+
+# 60. docs/adr/README.md documents ADR-26 (GitOps with Argo CD)
+if grep -q 'ADR-26' docs/adr/README.md; then
+  ok "docs/adr/README.md documents ADR-26"
+else
+  bad "docs/adr/README.md is missing ADR-26 (GitOps with Argo CD)"
+fi
+
+# 61. docs/troubleshooting.md and docs/component-qa.md have a Phase 8 section
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 8' "$f"; then
+    ok "$f has a Phase 8 section"
+  else
+    bad "$f is missing a Phase 8 section"
+  fi
+done
+
+# 62-63. Best-effort validation of a local polaris-gitops checkout, if one happens to exist next
+# to this repository (the default GITOPS_DIR) -- this repository's own CI never has one, so these
+# two checks simply do not run there. Local convenience only, never load-bearing for PASSED/FAILED
+# in a fresh checkout.
+GITOPS_SIBLING="$ROOT/../polaris-gitops"
+if [[ -d "$GITOPS_SIBLING" ]]; then
+  if have python3 && python3 -c "
+import sys, yaml, glob
+files = sorted(glob.glob('**/*.yaml', root_dir='$GITOPS_SIBLING', recursive=True))
+ok = True
+for f in files:
+    try:
+        list(yaml.safe_load_all(open('$GITOPS_SIBLING/' + f)))
+    except Exception as e:
+        print(f'{f}: {e}', file=sys.stderr)
+        ok = False
+sys.exit(0 if ok and files else 1)
+" 2>/tmp/gitops-yaml-errors; then
+    ok "polaris-gitops sibling checkout: every *.yaml file parses (found at $GITOPS_SIBLING)"
+  else
+    bad "polaris-gitops sibling checkout has invalid YAML: $(cat /tmp/gitops-yaml-errors 2>/dev/null)"
+  fi
+  missing=""
+  for f in bootstrap/root-app.yaml apps/dev-app.yaml apps/staging-app.yaml apps/prod-app.yaml \
+    environments/dev/image.yaml environments/staging/image.yaml environments/prod/image.yaml; do
+    [[ -f "$GITOPS_SIBLING/$f" ]] || missing="$missing $f"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "polaris-gitops sibling checkout has the expected Phase 8 layout"
+  else
+    bad "polaris-gitops sibling checkout is missing:$missing"
+  fi
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]
