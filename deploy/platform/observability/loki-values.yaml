@@ -15,8 +15,16 @@
 # path (its values.yaml comment, verified by reading it), which is an honest description of what
 # this cluster is. A PRODUCTION EQUIVALENT needs a real schemaConfig and object storage (S3/GCS/
 # Azure), not useTestSchema -- see docs/observability.md.
-
-deploymentMode: SingleBinary
+#
+# "SingleBinary" (the value this file used before a real target-machine run failed on it,
+# 2026-09-24) is listed in the chart's own values.yaml as a *deprecated alias* for "Monolithic",
+# but its validate.yaml template does not treat the two the same: it only exempts the literal
+# strings "Monolithic<->SimpleScalable"/"SingleBinary<->SimpleScalable" from failing when
+# singleBinary.replicas > 0 and the "simple scalable" targets (read/write/backend) also have
+# replicas > 0 -- and read/write/backend all default to replicas: 3 regardless of deploymentMode.
+# Setting deploymentMode alone, to either spelling, is not enough; read/write/backend must be
+# explicitly zeroed too (below). See docs/troubleshooting.md, Phase 9.
+deploymentMode: Monolithic
 
 loki:
   # Single-tenant local cluster: no X-Scope-OrgID header juggling between the OTel Collector,
@@ -42,6 +50,19 @@ singleBinary:
   persistence:
     enabled: true
     size: 5Gi
+
+# The chart's "simple scalable" targets (read/write/backend) default to replicas: 3 each, on top
+# of and regardless of the singleBinary target above -- deploymentMode alone does not zero them.
+# Left at their default, the chart's own validate.yaml template fails the install outright
+# ("You have more than zero replicas configured for both the monolithic and simple scalable
+# targets"), which is exactly what happened on the real, unfixed values file (docs/
+# troubleshooting.md, Phase 9). Monolithic mode needs none of these three running.
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
 
 # Both would add their own Memcached Deployments -- real extra memory for a cache layer that is
 # only worth it under query load nothing in this project generates yet.

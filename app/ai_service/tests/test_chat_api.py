@@ -265,7 +265,17 @@ def test_backend_result_defaults_allow_missing_token_counts() -> None:
 
 
 def test_reported_version_matches_the_installed_package(client: TestClient) -> None:
+    import tomllib
+    from pathlib import Path
+
     import ai_service
 
     assert client.get("/openapi.json").json()["info"]["version"] == ai_service.__version__
-    assert ai_service.__version__ == "0.3.0"
+
+    # Compared against pyproject.toml's own declared version, not a hardcoded string: a
+    # hardcoded "0.3.0" here is exactly what broke on Phase 9's 0.3.0 -> 0.4.0 bump (found on
+    # a real target-machine run, 2026-09-24, docs/troubleshooting.md) -- it silently drifts
+    # every time the version is bumped, since ai_service.__version__ itself already comes from
+    # installed package metadata (see ai_service/__init__.py), not from this test.
+    pyproject = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text())
+    assert ai_service.__version__ == pyproject["project"]["version"]

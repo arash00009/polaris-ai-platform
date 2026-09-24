@@ -51,16 +51,29 @@ GRAFANA_COMMUNITY_REPO_NAME="grafana-community"
 
 CLUSTER_NAME="$(cluster_name_from_config "$CLUSTER_CONFIG")"
 CONTEXT="k3d-${CLUSTER_NAME}"
-ROLLOUT_TIMEOUT="${OBS_ROLLOUT_TIMEOUT:-600s}"
+# 900s, not 600s: kube-prometheus-stack pulls several images at once on first install (Prometheus,
+# Grafana, kube-state-metrics, three admission-webhook Jobs) and a real target-machine run timed
+# out at 600s on a cold pull, the same class of issue -- and the same fix -- as Argo CD's
+# ARGOCD_ROLLOUT_TIMEOUT in Phase 8 (180s -> 900s, based on a real ~11-13 minute first pull on this
+# network). See docs/troubleshooting.md, Phase 9.
+ROLLOUT_TIMEOUT="${OBS_ROLLOUT_TIMEOUT:-900s}"
 
 hctl() { helm --kube-context "$CONTEXT" "$@"; }
 kctl() { kubectl --context "$CONTEXT" "$@"; }
 
 need_helm()    { have helm || die "helm not found. Run 'make tools-install'."; }
+# Retries a few times before giving up: a real run right after opening a fresh WSL2 terminal hit
+# a transient "cannot reach cluster" here even though the cluster was already up and every kubectl
+# command immediately afterward worked fine -- a cold-start timing hiccup (Docker/network not
+# fully settled yet), not an actual unreachable cluster. See docs/troubleshooting.md, Phase 9.
 need_kubectl() {
   have kubectl || die "kubectl not found. Run 'make doctor'."
-  kctl get nodes >/dev/null 2>&1 \
-    || die "Cannot reach cluster context '$CONTEXT'. Create it first: make cluster-up"
+  local attempt
+  for attempt in 1 2 3; do
+    kctl get nodes >/dev/null 2>&1 && return 0
+    [[ "$attempt" -lt 3 ]] && sleep 2
+  done
+  die "Cannot reach cluster context '$CONTEXT'. Create it first: make cluster-up"
 }
 
 add_repos() {
