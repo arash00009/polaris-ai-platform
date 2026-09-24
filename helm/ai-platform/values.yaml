@@ -36,11 +36,21 @@ config:
   POLARIS_READY_TIMEOUT_S: "2"
   POLARIS_MOCK_MODEL_NAME: "mock-1"
   POLARIS_MOCK_READY: "true"
+  # Phase 9 (Observability). Off at this shared-defaults level on purpose: turning traces/logs
+  # on here would make every environment depend on the observability namespace existing before
+  # its very first install. Each values-<env>.yaml turns it on explicitly, and only after
+  # deploy/platform/observability/ has been installed there first — see docs/observability.md
+  # and the Phase 9 guide's "Common errors" for what breaks if the order is reversed.
+  POLARIS_OTEL_ENABLED: "false"
+  POLARIS_OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+  # POLARIS_ENVIRONMENT is set per values-<env>.yaml, not here — "local" (ai_service/config.py's
+  # own default) would be wrong for every one of them.
 
 # Starting point only: the Phase 3 `docker run` figures, not measured under load (ADR-22,
 # docs/component-qa.md). Identical across environments — Phase 5 varies replica count and the
 # disruption budget per environment (legitimate operational knobs), not resource numbers nobody
-# has measured. Phase 9/11 replace this with numbers from an actual load test.
+# has measured. Phase 9 makes the real numbers available (Prometheus CPU/memory history per pod)
+# but does not itself replace these — see values-prod.yaml's comment. Still open for Phase 11.
 resources:
   requests:
     cpu: 50m
@@ -76,6 +86,26 @@ networkPolicy:
   enabled: true
   allowFromNamespace: kube-system
   allowPort: 8000
+  # Phase 9: a second ingress rule (additive to allowFromNamespace above) so Prometheus, running
+  # in the observability namespace, can scrape GET /metrics. The Deployment's egress is already
+  # unrestricted (templates/networkpolicy.yaml only sets policyTypes: ["Ingress"]), so nothing
+  # extra is needed for the app to push traces/logs out to the OTel Collector in that namespace.
+  allowScrapeFromNamespace: observability
+
+# Phase 9. False at this shared-defaults level for the same reason POLARIS_OTEL_ENABLED is:
+# ServiceMonitor is a CRD installed by kube-prometheus-stack (deploy/platform/observability/),
+# and `helm install`/Argo CD's sync would fail with "no matches for kind ServiceMonitor" if this
+# were on before that CRD exists. Each values-<env>.yaml turns it on explicitly, and only after
+# confirming the CRD is present (`kubectl get crd servicemonitors.monitoring.coreos.com`).
+serviceMonitor:
+  enabled: false
+  # How often Prometheus scrapes GET /metrics. Checked for real against the pinned chart
+  # (kube-prometheus-stack 91.5.0's values.yaml): prometheus.prometheusSpec.scrapeInterval is ""
+  # by default, which falls back to Prometheus Operator's own default of 1m. 30s here is a
+  # deliberate, tighter choice for this one low-traffic local service — dashboards feel more
+  # responsive while demoing this phase, and one extra scrape every 30s is not worth trading
+  # that away for. Not a claim that it matches any upstream default.
+  interval: 30s
 
 ingress:
   enabled: true

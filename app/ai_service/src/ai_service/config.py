@@ -24,6 +24,26 @@ class Settings(BaseSettings):
     # How long GET /readyz waits for the backend to confirm it is ready, in seconds. Kept short
     # on purpose: a readiness probe that hangs is worse than one that fails fast.
     ready_timeout_s: float = Field(default=2.0, gt=0, le=30)
+    # Which environment this process is running in. Not used for behaviour -- only attached to
+    # every trace/log as deployment.environment / the "env" field (Phase 0's cardinality-safe
+    # allow-list). "local" by default so a developer's own laptop is never mistaken for "dev".
+    environment: str = Field(default="local", min_length=1, max_length=32)
+
+    # --- Observability (Phase 9): metrics are always on; traces and logs are opt-in because
+    # they need somewhere to send OTLP data to. See ai_service/telemetry.py. ---
+    otel_enabled: bool = False
+    # The OTel Collector's Service DNS name inside the cluster (deploy/platform/observability/).
+    # Never blocks or fails a request even if nothing is listening here -- verified in the
+    # Phase 9 handoff.
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://otel-collector.observability.svc.cluster.local:4318",
+        min_length=1,
+    )
+    # Per-export HTTP timeout, in seconds. Kept short on purpose: shutdown() flushes and retries
+    # against this timeout before the process can exit, and terminationGracePeriodSeconds (see
+    # helm/ai-platform/values.yaml) only leaves a few seconds for that -- measured for real in
+    # the Phase 9 handoff, see ai_service/telemetry.py.
+    otel_exporter_timeout_s: float = Field(default=3.0, gt=0, le=10)
 
     # --- MockBackend (LOCAL / DEMO): deterministic answers, no model involved ---
     mock_model_name: str = Field(default="mock-1", min_length=1, max_length=64)

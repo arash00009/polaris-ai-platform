@@ -36,4 +36,15 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.allowPort }}
+    # Phase 9: Prometheus (in the observability namespace) scraping GET /metrics. A separate
+    # `from` entry, not appended to the one above, because every namespaceSelector in the same
+    # rule is OR'd with every port -- keeping them apart means allowFromNamespace's ingress is
+    # never accidentally widened to allowScrapeFromNamespace's namespace or vice versa.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowScrapeFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
 {{- end }}

@@ -22,7 +22,8 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	ci-secrets-scan ci-deps-audit ci-workflow-lint ci-verify \
 	verify-dev verify-staging verify-prod \
 	argocd-install argocd-status argocd-password argocd-uninstall gitops-bootstrap \
-	gitops-bump-dev gitops-bump-staging gitops-bump-prod
+	gitops-bump-dev gitops-bump-staging gitops-bump-prod \
+	obs-install obs-status obs-password obs-grafana obs-dashboard-configmap obs-uninstall
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -237,3 +238,27 @@ gitops-bump-staging: ## Same, for staging
 
 gitops-bump-prod: ## Same, for prod
 	./scripts/gitops/bump-image-tag.sh prod $(GITOPS_DIR) $(ARGS)
+
+# --- Phase 9: Observability (kube-prometheus-stack, Loki, Tempo, OTel Collector) ---------------
+# Its own 'observability' namespace, same pattern as argocd-* above. Install this BEFORE setting
+# serviceMonitor.enabled / config.POLARIS_OTEL_ENABLED to true for ai-platform in any environment
+# (already true in values-dev.yaml) — see docs/observability.md and scripts/bootstrap/
+# observability.sh's header comment for why the order matters.
+
+obs-install: ## Install the observability stack into the observability namespace (needs: make cluster-up)
+	./scripts/bootstrap/observability.sh install
+
+obs-status: ## Show the observability stack's Helm releases, pods, and whether ai-service's ServiceMonitor was discovered
+	./scripts/bootstrap/observability.sh status
+
+obs-password: ## Print the Grafana admin password (admin / <password>)
+	./scripts/bootstrap/observability.sh password
+
+obs-grafana: ## Port-forward Grafana to http://localhost:3000 (Ctrl-C to stop)
+	./scripts/bootstrap/observability.sh grafana
+
+obs-dashboard-configmap: ## Regenerate dashboards/ai-service-dashboard-configmap.yaml from dashboards/ai-service-dashboard.json
+	./scripts/bootstrap/observability.sh dashboard-configmap
+
+obs-uninstall: ## Remove the observability stack (polaris-dev/-staging/-prod are untouched)
+	./scripts/bootstrap/observability.sh uninstall

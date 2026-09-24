@@ -16,6 +16,12 @@ def test_defaults_describe_a_quiet_local_mock() -> None:
     assert settings.log_format == "text"
     assert settings.ready_timeout_s == 2.0
     assert settings.mock_ready is True
+    assert settings.environment == "local"
+    assert settings.otel_enabled is False
+    assert settings.otel_exporter_otlp_endpoint == (
+        "http://otel-collector.observability.svc.cluster.local:4318"
+    )
+    assert settings.otel_exporter_timeout_s == 3.0
 
 
 def test_values_come_from_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,6 +52,22 @@ def test_container_related_values_come_from_environment_variables(
     assert settings.mock_ready is False
 
 
+def test_observability_values_come_from_environment_variables(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("POLARIS_ENVIRONMENT", "staging")
+    monkeypatch.setenv("POLARIS_OTEL_ENABLED", "true")
+    monkeypatch.setenv("POLARIS_OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setenv("POLARIS_OTEL_EXPORTER_TIMEOUT_S", "5")
+
+    settings = Settings()
+
+    assert settings.environment == "staging"
+    assert settings.otel_enabled is True
+    assert settings.otel_exporter_otlp_endpoint == "http://collector:4318"
+    assert settings.otel_exporter_timeout_s == 5.0
+
+
 def test_unrelated_environment_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLARIS_SOMETHING_ELSE", "1")
     monkeypatch.setenv("HOME_PROXY", "x")
@@ -66,6 +88,10 @@ def test_unrelated_environment_variables_are_ignored(monkeypatch: pytest.MonkeyP
         ("log_format", "xml"),
         ("ready_timeout_s", 0),
         ("ready_timeout_s", 31),
+        ("environment", ""),
+        ("otel_exporter_timeout_s", 0),
+        ("otel_exporter_timeout_s", 11),
+        ("otel_exporter_otlp_endpoint", ""),
     ],
 )
 def test_out_of_range_values_are_rejected(name: str, value: object) -> None:

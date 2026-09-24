@@ -31,6 +31,7 @@ from ai_service.schemas import (
     ErrorResponse,
     StatusResponse,
 )
+from ai_service.telemetry import setup_telemetry, shutdown_telemetry
 
 logger = logging.getLogger("ai_service")
 access_logger = logging.getLogger("ai_service.access")
@@ -39,8 +40,9 @@ REQUEST_ID_HEADER = "x-request-id"
 # A client-supplied request id is only trusted if it is short and made of harmless characters.
 # Otherwise it could inject fake lines into logs or blow up the cardinality of a label.
 _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-# Probes hit these every few seconds; their access lines would drown everything else.
-_PROBE_PATHS = frozenset({"/healthz", "/readyz"})
+# Probes hit these every few seconds; their access lines would drown everything else. /metrics
+# joins them from Phase 9: Prometheus scrapes it on the same cadence as a probe.
+_PROBE_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
 
 
 class ApiError(Exception):
@@ -84,9 +86,15 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             yield
         finally:
             await app.state.backend.aclose()
+            shutdown_telemetry(app)
 
     app = FastAPI(title="Polaris AI service", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    # Metrics (always) and, if POLARIS_OTEL_ENABLED, traces/logs (see ai_service/telemetry.py).
+    # Done before any other middleware is registered, same as upstream's own recommendation for
+    # both instrumentors: prometheus-fastapi-instrumentator's request middleware and
+    # OpenTelemetry's ASGI wrapper both want to see the request before anything else touches it.
+    setup_telemetry(app, settings)
 
     @app.middleware("http")
     async def request_id_middleware(

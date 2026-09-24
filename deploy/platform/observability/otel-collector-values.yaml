@@ -1,0 +1,69 @@
+# deploy/platform/observability/otel-collector-values.yaml — Phase 9.
+#
+# Chart: open-telemetry/opentelemetry-collector, version pinned in versions.env
+# (OTEL_COLLECTOR_CHART_VERSION), verified for real against the chart's own Chart.yaml on
+# raw.githubusercontent.com.
+#
+# mode: deployment (a plain Deployment + ClusterIP Service), not daemonset. ai_service/
+# telemetry.py pushes both traces and logs to this Collector over OTLP/HTTP directly (the app
+# already has the structured JSON logs it needs -- see logging_setup.py -- so there is no need
+# to tail node-local container log files with a filelog receiver, which is the usual reason to
+# run a DaemonSet node-agent). Only metrics stay Prometheus-*scrape*-based, per ADR-06 --
+# Prometheus scrapes ai-service's /metrics directly via the ServiceMonitor
+# (helm/ai-platform/templates/servicemonitor.yaml); this Collector is not in that path at all.
+#
+# Everything the chart's own default config already provides is left alone (the otlp receiver on
+# :4317/:4318, the health_check extension both probes need, the batch/memory_limiter processors)
+# -- see versions.env / the chart's values.yaml for what that default config contains. Only the
+# exporters and the logs/traces pipelines are overridden, to replace the chart's default `debug`
+# exporter with real destinations. The default metrics pipeline (its own internal telemetry,
+# still going to `debug`) is left as-is: nothing in this project sends it anything to export.
+
+mode: deployment
+replicaCount: 1
+
+fullnameOverride: otel-collector
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+config:
+  exporters:
+    debug: {}
+    # /otlp/v1/logs is Loki's own OTLP ingestion path, not the standard OTLP/HTTP suffix --
+    # verified against Grafana's own Loki docs during Phase 9 development. The otlphttp exporter
+    # appends /v1/logs itself, so the endpoint given here is the /otlp base, not the bare Service.
+    otlphttp/loki:
+      endpoint: http://loki.observability.svc.cluster.local:3100/otlp
+      tls:
+        insecure: true
+    # Tempo's OTLP/HTTP receiver is on :4318 at the standard /v1/traces path (confirmed against
+    # the pinned single-binary Tempo chart's generated config, unconditionally on, no toggle).
+    otlphttp/tempo:
+      endpoint: http://tempo.observability.svc.cluster.local:4318
+      tls:
+        insecure: true
+  service:
+    pipelines:
+      logs:
+        exporters:
+          - otlphttp/loki
+      traces:
+        exporters:
+          - otlphttp/tempo
+
+# The metrics port (the Collector's own internal telemetry, :8888) is off by default and the
+# chart's own values.yaml says explicitly that serviceMonitor.enabled needs it turned on first --
+# checked, not assumed, after serviceMonitor.enabled: true alone rendered a ServiceMonitor
+# pointing at a port that would not have existed on the Service.
+ports:
+  metrics:
+    enabled: true
+
+serviceMonitor:
+  enabled: true

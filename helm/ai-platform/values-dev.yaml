@@ -9,3 +9,16 @@ namespace: polaris-dev
 
 ingress:
   host: ai.localhost
+
+# Phase 9. Only dev turns these on in this delivery — same "prove it in one environment first"
+# pattern Phase 5 itself used before staging/prod existed. Turning them on here is only safe
+# AFTER deploy/platform/observability/ has been installed (see values.yaml's comments on
+# serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED, and the Phase 9 guide's step order) --
+# do not cherry-pick this block into values-staging.yaml/values-prod.yaml without installing the
+# observability stack in those clusters first too.
+config:
+  POLARIS_ENVIRONMENT: "dev"
+  POLARIS_OTEL_ENABLED: "true"
+
+serviceMonitor:
+  enabled: true

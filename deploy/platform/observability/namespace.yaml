@@ -1,0 +1,23 @@
+# deploy/platform/observability/namespace.yaml — Phase 9.
+#
+# pod-security.kubernetes.io/enforce: baseline, not restricted. Deliberately more permissive
+# than deploy/k8s/ai-service/namespace.yaml's "restricted": that label was only put on
+# polaris-dev/-staging/-prod after Phase 3 verified ai-service's own image actually runs
+# non-root, capability-dropped, with a read-only root filesystem under it (make image-check).
+# Nothing in this phase did the equivalent check for kube-prometheus-stack/Loki/Tempo/the OTel
+# Collector's own upstream images and Helm-generated PodSecurityContexts -- some third-party
+# charts need privileged init containers or specific fsGroup/runAsUser combinations that
+# "restricted" would reject outright, and finding out which is a real target-machine step, not
+# something to guess at here. "baseline" still blocks privileged containers and host namespaces;
+# tightening this to "restricted" once it is verified to work is a named follow-up, not done
+# silently -- see docs/observability.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    app.kubernetes.io/part-of: polaris
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

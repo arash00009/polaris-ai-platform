@@ -1,0 +1,32 @@
+# helm/ai-platform/templates/servicemonitor.yaml — Phase 9.
+#
+# A ServiceMonitor is a CRD installed by kube-prometheus-stack's Prometheus Operator
+# (deploy/platform/observability/), not a built-in Kubernetes kind. helm install/upgrade (and
+# Argo CD's sync, Phase 8) fail with "no matches for kind ServiceMonitor in version
+# monitoring.coreos.com/v1" if this renders before that CRD exists -- see values.yaml's comment
+# on serviceMonitor.enabled (false by default for exactly this reason) and docs/observability.md.
+#
+# This resource lives in the same namespace as the ai-service Service it targets (polaris-dev/
+# staging/prod), not in the observability namespace. A ServiceMonitor only looks for Services in
+# its own namespace unless spec.namespaceSelector is set, so no namespaceSelector is needed here
+# -- the cluster-wide discovery instead happens on the Prometheus side, by setting
+# serviceMonitorSelectorNilUsesHelmValues: false in the kube-prometheus-stack values (a
+# deliberate simplification documented as an ADR trade-off: fine for a single-tenant local
+# cluster, not for a shared one where any namespace could plant an unwanted ServiceMonitor).
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-service
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ai-platform.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

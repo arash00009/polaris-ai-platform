@@ -637,9 +637,12 @@ done
 # 62-63. Best-effort validation of a local polaris-gitops checkout, if one happens to exist next
 # to this repository (the default GITOPS_DIR) -- this repository's own CI never has one, so these
 # two checks simply do not run there. Local convenience only, never load-bearing for PASSED/FAILED
-# in a fresh checkout.
+# in a fresh checkout. Gated on bootstrap/root-app.yaml specifically, not just the directory
+# existing: `mkdir -p` (e.g. from a retried, previously-failed unzip) can leave an empty
+# directory behind, and an empty checkout is not something to report FAIL against -- it is simply
+# not there yet, the same "nothing to check" case the directory-missing branch already handles.
 GITOPS_SIBLING="$ROOT/../polaris-gitops"
-if [[ -d "$GITOPS_SIBLING" ]]; then
+if [[ -f "$GITOPS_SIBLING/bootstrap/root-app.yaml" ]]; then
   if have python3 && python3 -c "
 import sys, yaml, glob
 files = sorted(glob.glob('**/*.yaml', root_dir='$GITOPS_SIBLING', recursive=True))
@@ -666,6 +669,163 @@ sys.exit(0 if ok and files else 1)
   else
     bad "polaris-gitops sibling checkout is missing:$missing"
   fi
+fi
+
+# --- Phase 9: Observability (kube-prometheus-stack, Loki, Tempo, OTel Collector) ---------------
+
+# 64. versions.env: the two charts that ARE pinned exactly look like semver
+for var in KUBE_PROMETHEUS_STACK_VERSION OTEL_COLLECTOR_CHART_VERSION; do
+  val="${!var:-}"
+  if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then ok "$var=$val"; else bad "$var is missing or not X.Y.Z (got '$val')"; fi
+done
+
+# 65. versions.env: Loki/Tempo chart versions are deliberately EMPTY (see that file's own Phase 9
+# comment for why), but their repo URLs must still be set, or observability.sh has nothing to
+# 'helm repo add'
+for var in LOKI_HELM_REPO TEMPO_HELM_REPO; do
+  val="${!var:-}"
+  if [[ "$val" == https://* ]]; then ok "$var=$val"; else bad "$var must be set to a https:// repo URL"; fi
+done
+if [[ -z "${LOKI_CHART_VERSION:-}" && -z "${TEMPO_CHART_VERSION:-}" ]]; then
+  ok "LOKI_CHART_VERSION/TEMPO_CHART_VERSION are still deliberately unpinned"
+else
+  ok "LOKI_CHART_VERSION/TEMPO_CHART_VERSION have been pinned from real install output (versions.env)"
+fi
+
+# 66. Every deploy/platform/observability/*.yaml file parses as valid YAML (helm itself cannot
+# run in CI/this sandbox -- see scripts/bootstrap/observability.sh's header comment -- so this is
+# the syntax check available without it; semantic correctness is the target-machine step)
+if have python3; then
+  if python3 -c "
+import sys, glob, yaml
+files = sorted(glob.glob('deploy/platform/observability/**/*.yaml', recursive=True))
+ok = True
+for f in files:
+    try:
+        list(yaml.safe_load_all(open(f)))
+    except Exception as e:
+        print(f'{f}: {e}', file=sys.stderr)
+        ok = False
+sys.exit(0 if ok and files else 1)
+" 2>/tmp/obs-yaml-errors; then
+    ok "every deploy/platform/observability/*.yaml file parses as YAML"
+  else
+    bad "invalid YAML under deploy/platform/observability/: $(cat /tmp/obs-yaml-errors 2>/dev/null)"
+  fi
+fi
+
+# 67. The dashboard JSON is valid, and the ConfigMap's embedded copy matches it byte-for-byte --
+# this is exactly the drift `make obs-dashboard-configmap` exists to prevent, so CI catches it
+# even before anyone runs that command by hand.
+DASHBOARD_JSON="deploy/platform/observability/dashboards/ai-service-dashboard.json"
+DASHBOARD_CONFIGMAP="deploy/platform/observability/dashboards/ai-service-dashboard-configmap.yaml"
+if have python3 && [[ -f "$DASHBOARD_JSON" && -f "$DASHBOARD_CONFIGMAP" ]]; then
+  if DASHBOARD_JSON="$DASHBOARD_JSON" DASHBOARD_CONFIGMAP="$DASHBOARD_CONFIGMAP" python3 -c "
+import json, os, sys
+json_path = os.environ['DASHBOARD_JSON']
+configmap_path = os.environ['DASHBOARD_CONFIGMAP']
+with open(json_path) as f:
+    want = json.load(f)
+import yaml
+with open(configmap_path) as f:
+    doc = yaml.safe_load(f)
+got = json.loads(doc['data']['ai-service-dashboard.json'])
+sys.exit(0 if want == got else 1)
+"; then
+    ok "dashboard ConfigMap matches ai-service-dashboard.json (run 'make obs-dashboard-configmap' if not)"
+  else
+    bad "dashboard ConfigMap has drifted from ai-service-dashboard.json -- run 'make obs-dashboard-configmap'"
+  fi
+fi
+
+# 68. The ConfigMap carries the label the Grafana sidecar watches for
+if grep -q 'grafana_dashboard: "1"' "$DASHBOARD_CONFIGMAP" 2>/dev/null; then
+  ok "dashboard ConfigMap carries grafana_dashboard: \"1\""
+else
+  bad "$DASHBOARD_CONFIGMAP is missing the grafana_dashboard: \"1\" label the sidecar watches for"
+fi
+
+# 69. The new ServiceMonitor template exists
+SVCMON="helm/ai-platform/templates/servicemonitor.yaml"
+if [[ -f "$SVCMON" ]] && grep -q 'kind: ServiceMonitor' "$SVCMON" && grep -q 'serviceMonitor.enabled' "$SVCMON"; then
+  ok "$SVCMON exists and is gated on .Values.serviceMonitor.enabled"
+else
+  bad "$SVCMON is missing, or not gated on .Values.serviceMonitor.enabled (see values.yaml's comment on why it must be)"
+fi
+
+# 70. Base values.yaml keeps serviceMonitor.enabled and POLARIS_OTEL_ENABLED both false: the
+# CRD-ordering hazard documented in values.yaml/ADR-27 means the shared defaults must stay off
+if grep -A2 '^serviceMonitor:' helm/ai-platform/values.yaml | grep -q 'enabled: false'; then
+  ok "helm/ai-platform/values.yaml: serviceMonitor.enabled defaults to false"
+else
+  bad "helm/ai-platform/values.yaml must default serviceMonitor.enabled to false (CRD-ordering hazard, see ADR-27)"
+fi
+if grep -q 'POLARIS_OTEL_ENABLED: "false"' helm/ai-platform/values.yaml; then
+  ok "helm/ai-platform/values.yaml: config.POLARIS_OTEL_ENABLED defaults to \"false\""
+else
+  bad "helm/ai-platform/values.yaml must default config.POLARIS_OTEL_ENABLED to \"false\""
+fi
+
+# 71. values-dev.yaml is the one environment wired up to the observability stack in this delivery
+if grep -q 'POLARIS_OTEL_ENABLED: "true"' helm/ai-platform/values-dev.yaml \
+  && grep -A1 '^serviceMonitor:' helm/ai-platform/values-dev.yaml | grep -q 'enabled: true'; then
+  ok "helm/ai-platform/values-dev.yaml turns on serviceMonitor and POLARIS_OTEL_ENABLED"
+else
+  bad "helm/ai-platform/values-dev.yaml must set serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED to true"
+fi
+
+# 72. values-staging.yaml/values-prod.yaml do NOT turn these on -- the observability stack is
+# only proved in polaris-dev in this delivery (see those files' own comments)
+for env in staging prod; do
+  f="helm/ai-platform/values-$env.yaml"
+  if grep -q 'POLARIS_OTEL_ENABLED: "true"' "$f" 2>/dev/null || grep -q 'enabled: true' "$f" 2>/dev/null; then
+    bad "$f must not enable serviceMonitor/POLARIS_OTEL_ENABLED yet -- observability is only installed in polaris-dev this phase"
+  else
+    ok "$f correctly leaves serviceMonitor/POLARIS_OTEL_ENABLED at their false defaults"
+  fi
+done
+
+# 73. app/ai_service pins the new Phase 9 packages in both requirements.txt and pyproject.toml
+for pkg in prometheus-fastapi-instrumentator opentelemetry-api opentelemetry-sdk \
+  opentelemetry-exporter-otlp-proto-http opentelemetry-instrumentation-fastapi; do
+  if grep -q "^$pkg==" app/ai_service/requirements.txt; then
+    ok "requirements.txt pins $pkg"
+  else
+    bad "requirements.txt is missing a pin for $pkg"
+  fi
+  if grep -q "\"$pkg" app/ai_service/pyproject.toml; then
+    ok "pyproject.toml declares $pkg as a direct dependency"
+  else
+    bad "pyproject.toml is missing $pkg in [project].dependencies"
+  fi
+done
+
+# 74. README.md: Phase 9's status row is no longer "Planned"
+if grep -E '^\| 9 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 9 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 9 status row still says Planned (or the row is missing/reworded)"
+fi
+
+# 75. docs/adr/README.md documents ADR-27
+if grep -q 'ADR-27' docs/adr/README.md; then
+  ok "docs/adr/README.md documents ADR-27"
+else
+  bad "docs/adr/README.md is missing ADR-27 (Observability scope/trade-off decisions)"
+fi
+
+# 76. docs/troubleshooting.md, docs/component-qa.md and docs/observability.md all exist/mention Phase 9
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 9' "$f"; then
+    ok "$f has a Phase 9 section"
+  else
+    bad "$f is missing a Phase 9 section"
+  fi
+done
+if [[ -f docs/observability.md ]]; then
+  ok "docs/observability.md exists"
+else
+  bad "docs/observability.md is missing (named in Phase 0's repository layout)"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"

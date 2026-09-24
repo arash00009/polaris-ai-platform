@@ -1,0 +1,61 @@
+# deploy/platform/observability/loki-values.yaml — Phase 9.
+#
+# Chart: as of 2026-03-16 this chart moved from grafana/helm-charts to grafana-community/
+# helm-charts (grafana/helm-charts's copy is now frozen for Grafana Enterprise Logs customers
+# only — confirmed for real from that repo's own charts/loki/README.md and Grafana's own "Upgrade
+# to the community Helm chart" doc, both fetched during Phase 9 development). Its version moves
+# fast even day to day (18.7.6 per Grafana's docs page, 18.11.7 from one raw Chart.yaml fetch,
+# 18.13.5 from a second one minutes later, all checked live on 2026-09-23) -- see versions.env for
+# why LOKI_CHART_VERSION is deliberately left unpinned here rather than guessed at, and
+# scripts/bootstrap/observability.sh for how the real installed version gets resolved and printed
+# so it can be pinned deliberately in a follow-up commit.
+#
+# Deployment shape: Monolithic (the chart's own default) with filesystem storage and
+# loki.useTestSchema -- literally the chart's own documented "for testing or playing around"
+# path (its values.yaml comment, verified by reading it), which is an honest description of what
+# this cluster is. A PRODUCTION EQUIVALENT needs a real schemaConfig and object storage (S3/GCS/
+# Azure), not useTestSchema -- see docs/observability.md.
+
+deploymentMode: SingleBinary
+
+loki:
+  # Single-tenant local cluster: no X-Scope-OrgID header juggling between the OTel Collector,
+  # Grafana's datasource and Loki itself. Same simplification already made for Prometheus
+  # ServiceMonitor discovery (kube-prometheus-stack-values.yaml) and documented the same way
+  # (ADR-27): fine here, wrong for a shared/multi-tenant cluster.
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  useTestSchema: true
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 5Gi
+
+# Both would add their own Memcached Deployments -- real extra memory for a cache layer that is
+# only worth it under query load nothing in this project generates yet.
+resultsCache:
+  enabled: false
+chunksCache:
+  enabled: false
+
+# The nginx gateway in front of Loki is for routing/auth in a multi-component deployment; with
+# auth_enabled: false and everything inside the cluster talking straight to the `loki` Service
+# (port 3100 — see kube-prometheus-stack-values.yaml's Grafana datasource and otel-collector-
+# values.yaml's exporter), it is one more moving part with nothing to add here.
+gateway:
+  enabled: false
+
+test:
+  enabled: false

@@ -1,0 +1,105 @@
+# deploy/platform/observability/kube-prometheus-stack-values.yaml — Phase 9.
+#
+# Chart: prometheus-community/kube-prometheus-stack, version pinned in versions.env
+# (KUBE_PROMETHEUS_STACK_VERSION), verified for real against the chart's own Chart.yaml on
+# raw.githubusercontent.com — see versions.env's comment for how and when.
+#
+# Scope, deliberately trimmed for a single-developer local cluster (Phase 0's "Done when" is
+# "Grafana shows metrics, logs, traces and the required dashboards" for the AI service, not full
+# cluster observability): node-exporter (a DaemonSet, one pod per node) is OFF -- real memory for
+# node-level metrics the dashboard in dashboards/ai-service-dashboard-configmap.yaml does not use.
+# kube-state-metrics stays ON despite the same "trim what nothing uses" logic: it is a single
+# small Deployment (not per-node), and the dashboard's restart-count panel needs the metric it is
+# the only source of (kube_pod_container_status_restarts_total -- cAdvisor/kubelet do not expose
+# restart counts). This split is a real, named trade-off (see docs/adr/README.md, ADR-27), not an
+# oversight. Re-enable nodeExporter too (one-line flip below) if a later phase needs node-level
+# panels.
+#
+# Alertmanager is OFF too: nothing in this project defines alert rules yet, so running it would
+# just be an idle process. Revisit if/when an alerting phase is added to the roadmap.
+
+fullnameOverride: kube-prometheus-stack
+
+alertmanager:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+# These four "kube*" self-monitoring targets all come from kubeStateMetrics/nodeExporter or from
+# control-plane components k3d does not expose the same way a managed cluster would (etcd,
+# scheduler, controller-manager). Disabling their ServiceMonitors avoids a wall of "down" targets
+# in Prometheus's own /targets page for infrastructure this project is not trying to observe.
+kubeApiServer:
+  enabled: false
+kubelet:
+  enabled: true
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+
+prometheus:
+  prometheusSpec:
+    # Cluster-wide ServiceMonitor discovery: Prometheus watches every ServiceMonitor in every
+    # namespace, not just ones carrying a specific release label. Deliberate simplification for
+    # a single-tenant local cluster -- see values.yaml's comment on the ai-platform chart's own
+    # serviceMonitor.enabled and ADR-27. Not appropriate for a shared/multi-tenant cluster, where
+    # any namespace could plant a ServiceMonitor Prometheus would then blindly scrape.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorSelector: {}
+    serviceMonitorNamespaceSelector: {}
+    # Short retention: this is a demonstration cluster meant to be torn down and rebuilt
+    # (deploy/k3d/cluster.yaml), not a system anyone depends on having historical data from.
+    retention: 3d
+    resources:
+      requests:
+        cpu: 100m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    storageSpec: {}
+
+grafana:
+  # Local-only credential, not a secret worth managing specially: this cluster is destroyed and
+  # rebuilt from deploy/k3d/cluster.yaml, and nothing outside the developer's own machine can
+  # reach it (no ingress TLS, no external DNS). `make obs-password` still reads it from the
+  # Secret rather than this file, so the real value never needs to be typed twice.
+  adminPassword: polaris-local-only
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # Auto-provisioned datasources: Prometheus is provisioned by the chart itself by default; Loki
+  # and Tempo are added here so all three signals are queryable from the moment Grafana starts,
+  # with no click-through setup. uid values are referenced from the dashboard JSON in
+  # dashboards/ai-service-dashboard-configmap.yaml.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      uid: loki
+      access: proxy
+      url: http://loki.observability.svc.cluster.local:3100
+      jsonData:
+        maxLines: 1000
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      access: proxy
+      url: http://tempo.observability.svc.cluster.local:3100
+  # The sidecar watches ConfigMaps labelled grafana_dashboard=1 in every namespace and loads them
+  # automatically -- see dashboards/ai-service-dashboard-configmap.yaml's label. No manual import.
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL

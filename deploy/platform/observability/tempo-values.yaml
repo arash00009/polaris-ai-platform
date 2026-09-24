@@ -1,0 +1,36 @@
+# deploy/platform/observability/tempo-values.yaml — Phase 9.
+#
+# Chart: the single-binary "Grafana Tempo Single Binary Mode" chart, which moved from
+# grafana/helm-charts to grafana-community/helm-charts (charts/tempo) on 2026-01-30 — confirmed
+# for real from that repo's own README migration notice during Phase 9 development. Same
+# LOKI_CHART_VERSION reasoning applies to TEMPO_CHART_VERSION in versions.env: left unpinned here,
+# resolved and printed at install time.
+#
+# Everything not set below is the chart's own default and was checked, not assumed: OTLP/HTTP
+# ingestion on :4318 (path /v1/traces) is unconditionally on in this chart (no toggle needed) and
+# local-disk trace storage (tempo.storage.trace.backend: local) is already the default too — no
+# object storage to configure for a local/demo install. A PRODUCTION EQUIVALENT needs object
+# storage (S3/GCS/Azure) here the same way loki-values.yaml's comment says for Loki.
+
+replicas: 1
+
+tempo:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # Nothing here queries Grafana Labs' usage-reporting endpoint for anything -- off on principle,
+  # same reasoning as every other "keep this cluster's traffic inside itself" choice in this repo.
+  reportingEnabled: false
+
+# Ephemeral (emptyDir-backed) trace storage: this is a demo cluster meant to be torn down and
+# rebuilt (deploy/k3d/cluster.yaml), same choice as kube-prometheus-stack-values.yaml's
+# storageSpec: {} for Prometheus. Traces surviving a Tempo pod restart is not a requirement here.
+persistence:
+  enabled: false
+
+serviceMonitor:
+  enabled: true

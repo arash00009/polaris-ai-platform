@@ -10,3 +10,11 @@ namespace: polaris-staging
 
 ingress:
   host: ai-staging.localhost
+
+# Phase 9. POLARIS_ENVIRONMENT is safe to set unconditionally (just an attribute on the app's own
+# logs/spans). serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED stay at values.yaml's false
+# default here on purpose -- this delivery only proves the observability stack in polaris-dev
+# (see values-dev.yaml's comment). Installing deploy/platform/observability/ into this namespace
+# too and flipping the same two switches here is the natural next step, not done in Phase 9.
+config:
+  POLARIS_ENVIRONMENT: "staging"

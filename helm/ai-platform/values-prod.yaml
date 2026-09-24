@@ -2,7 +2,11 @@
 #
 # Two knobs are deliberately different from dev/staging, and both are operational policy
 # decisions, not capacity numbers — the resource requests/limits stay identical everywhere
-# because nobody has load-tested this service (see values.yaml's comment; Phase 9/11 fixes that):
+# because nobody has load-tested this service (see values.yaml's comment). Phase 9 makes the
+# data to fix that possible (Prometheus now has real CPU/memory/latency history per pod, once
+# the observability stack is installed into a namespace) but does not fix it here: that still
+# needs someone to read those Grafana panels under real load and adjust these numbers. Left
+# honestly unresolved rather than guessed at:
 #   - replicaCount: 3, so a single voluntary disruption never drops below 2 running pods.
 #   - podDisruptionBudget.minAvailable: 2, matching that same intent.
 environment: prod
@@ -15,3 +19,8 @@ podDisruptionBudget:
 
 ingress:
   host: ai-prod.localhost
+
+# Phase 9. Same reasoning as values-staging.yaml: POLARIS_ENVIRONMENT is unconditionally safe,
+# the observability stack itself is only proved in polaris-dev in this delivery.
+config:
+  POLARIS_ENVIRONMENT: "prod"
