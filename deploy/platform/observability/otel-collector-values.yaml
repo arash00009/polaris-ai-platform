@@ -24,6 +24,22 @@ replicaCount: 1
 
 fullnameOverride: otel-collector
 
+# Required as of chart 0.173.x (breaking change, see the chart's own UPGRADING.md, "0.172.x to
+# 0.173.0" / issue #1135): the chart no longer defaults image.repository to the Contrib
+# distribution -- it now fails the install outright with "[ERROR] 'image.repository' must be
+# set" unless a repository is set explicitly. Confirmed for real: this exact error, on this exact
+# chart version, on a real target-machine `make obs-install` run (2026-09-24, see
+# docs/troubleshooting.md's Phase 9 section).
+#
+# otel/opentelemetry-collector-k8s is the chart maintainers' own recommended distribution going
+# forward (UPGRADING.md again). Checked against its real component manifest
+# (open-telemetry/opentelemetry-collector-releases, distributions/otelcol-k8s/manifest.yaml)
+# rather than assumed: it includes every component this values file's config actually uses --
+# the otlp receiver, the otlphttp exporter, the debug exporter, the batch and memory_limiter
+# processors, and the healthcheck extension. No need for the larger, broader Contrib image.
+image:
+  repository: "otel/opentelemetry-collector-k8s"
+
 resources:
   requests:
     cpu: 50m
