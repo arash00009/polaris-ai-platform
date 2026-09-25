@@ -71,13 +71,21 @@ grafana:
   # reach it (no ingress TLS, no external DNS). `make obs-password` still reads it from the
   # Secret rather than this file, so the real value never needs to be typed twice.
   adminPassword: polaris-local-only
+  # 128Mi/256Mi (Phase 3-era estimate, never load-tested) was too low for this chart's Grafana
+  # version in practice: confirmed OOMKilled (exit code 137) on the target machine, 2026-09-24 --
+  # `kubectl -n observability describe pod <grafana-pod>` showed "Last State: Terminated, Reason:
+  # OOMKilled" against this exact 256Mi limit, repeatedly, with the container's own GOMEMLIMIT set
+  # to 230MiB. This Grafana version's newer unified-storage/dashboards-as-resources subsystem (a
+  # bleve search index built at startup, an internal apiserver-style component) uses noticeably
+  # more memory than classic Grafana did, especially while that index is first being built. Real
+  # evidence, not a guess -- see docs/troubleshooting.md's Phase 9 section.
   resources:
     requests:
       cpu: 50m
-      memory: 128Mi
+      memory: 256Mi
     limits:
       cpu: 500m
-      memory: 256Mi
+      memory: 512Mi
   # Auto-provisioned datasources: Prometheus is provisioned by the chart itself by default; Loki
   # and Tempo are added here so all three signals are queryable from the moment Grafana starts,
   # with no click-through setup. uid values are referenced from the dashboard JSON in
