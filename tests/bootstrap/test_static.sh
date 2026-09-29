@@ -828,5 +828,46 @@ else
   bad "docs/observability.md is missing (named in Phase 0's repository layout)"
 fi
 
+# 77. README.md: Phase 10's status row is no longer "Planned"
+if grep -E '^\| 10 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 10 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 10 status row still says Planned (or the row is missing/reworded)"
+fi
+
+# 78. docs/adr/README.md documents ADR-28
+if grep -q 'ADR-28' docs/adr/README.md; then
+  ok "docs/adr/README.md documents ADR-28"
+else
+  bad "docs/adr/README.md is missing ADR-28 (OpenTelemetry attribute curation decisions)"
+fi
+
+# 79. docs/troubleshooting.md and docs/component-qa.md have a Phase 10 section
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 10' "$f"; then
+    ok "$f has a Phase 10 section"
+  else
+    bad "$f is missing a Phase 10 section"
+  fi
+done
+
+# 80. telemetry.py actually defines the Phase 10 curation pieces (not just documented, wired in)
+if grep -q 'SPAN_ATTRIBUTE_ALLOWLIST' app/ai_service/src/ai_service/telemetry.py \
+  && grep -q '_FilteringSpanExporter' app/ai_service/src/ai_service/telemetry.py \
+  && grep -q '_LogAttributeAllowlistFilter' app/ai_service/src/ai_service/telemetry.py; then
+  ok "telemetry.py defines the Phase 10 span/log attribute curation pieces"
+else
+  bad "telemetry.py is missing one of SPAN_ATTRIBUTE_ALLOWLIST / _FilteringSpanExporter / _LogAttributeAllowlistFilter"
+fi
+
+# 81. logging_setup.py defines TraceContextFilter and LOG_FIELDS carries trace_id/span_id
+if grep -q 'class TraceContextFilter' app/ai_service/src/ai_service/logging_setup.py \
+  && grep -q '"trace_id"' app/ai_service/src/ai_service/logging_setup.py \
+  && grep -q '"span_id"' app/ai_service/src/ai_service/logging_setup.py; then
+  ok "logging_setup.py defines TraceContextFilter and LOG_FIELDS carries trace_id/span_id"
+else
+  bad "logging_setup.py is missing TraceContextFilter or the trace_id/span_id LOG_FIELDS entries"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

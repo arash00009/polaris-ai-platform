@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai_service import __version__
@@ -57,6 +58,21 @@ class ApiError(Exception):
 
 def _request_id_of(request: Request) -> str:
     return getattr(request.state, "request_id", "unknown")
+
+
+def _set_span_attributes(**attributes: str | int | float) -> None:
+    """Set the given attributes on the current span, if any.
+
+    A safe no-op when POLARIS_OTEL_ENABLED=false: with no SDK TracerProvider installed,
+    trace.get_current_span() returns a non-recording span whose set_attribute() does nothing
+    (verified directly, not assumed -- see this phase's handoff). Every name passed here must be
+    in telemetry.SPAN_ATTRIBUTE_ALLOWLIST; _FilteringSpanExporter drops anything that is not,
+    before it ever leaves the process, but a name that is never on the allow-list in the first
+    place is dead code, so keep the two in sync.
+    """
+    span = trace.get_current_span()
+    for key, value in attributes.items():
+        span.set_attribute(key, value)
 
 
 def _error_response(
@@ -170,6 +186,10 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
     )
     async def chat(body: ChatRequest, request: Request) -> ChatResponse:
         request_id = _request_id_of(request)
+        # Set as early as possible so even a timed-out or failed call's span carries them --
+        # these are exactly the fields nothing in FastAPI's own auto-instrumentation can know
+        # about (Phase 10, docs/architecture.md section 6's allow-list).
+        _set_span_attributes(tenant_id=body.tenant_id, request_id=request_id)
         started = time.perf_counter()
         try:
             async with asyncio.timeout(settings.backend_timeout_s):
@@ -211,6 +231,11 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                 "completion_tokens": result.completion_tokens,
             },
         )
+        _set_span_attributes(model=result.model, latency_ms=latency_ms)
+        if result.prompt_tokens is not None:
+            _set_span_attributes(prompt_tokens=result.prompt_tokens)
+        if result.completion_tokens is not None:
+            _set_span_attributes(completion_tokens=result.completion_tokens)
         return ChatResponse(
             response=result.text,
             model=result.model,

@@ -1,13 +1,20 @@
 """GET /metrics, and the opt-in OTel tracing/logging wiring (POLARIS_OTEL_ENABLED)."""
 
+import json
 import logging
+import re
 import time
 from collections.abc import Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk._logs import LoggingHandler
+from opentelemetry.sdk._logs.export import LogExportResult
+from opentelemetry.sdk.trace.export import SpanExportResult
 
+from ai_service import telemetry
 from ai_service.config import Settings
 from ai_service.main import create_app
 
@@ -167,3 +174,120 @@ def test_otel_enabled_still_serves_chat_requests_normally() -> None:
         response = otel_client.post("/v1/chat", json=VALID)
     assert response.status_code == 200
     assert response.json()["response"]
+
+
+# ---- Phase 10: span/log attribute curation and log<->trace correlation -----------------------
+#
+# Every test below patches OTLPSpanExporter.export/OTLPLogExporter.export at the class level to
+# capture exactly what would have gone over the wire, instead of attempting (and waiting out the
+# timeout of) a real call to UNREACHABLE. This is the seam telemetry.py actually has: neither
+# exporter is constructed anywhere accessible before setup_telemetry() runs, so patching the
+# class method is the only way to observe a call made deep inside it.
+
+
+def _capture_exports(monkeypatch: pytest.MonkeyPatch) -> tuple[list, list]:
+    captured_spans: list = []
+    captured_logs: list = []
+
+    def fake_span_export(self: OTLPSpanExporter, spans: object) -> SpanExportResult:
+        captured_spans.extend(spans)
+        return SpanExportResult.SUCCESS
+
+    def fake_log_export(self: OTLPLogExporter, batch: object) -> LogExportResult:
+        captured_logs.extend(batch)
+        return LogExportResult.SUCCESS
+
+    monkeypatch.setattr(OTLPSpanExporter, "export", fake_span_export)
+    monkeypatch.setattr(OTLPLogExporter, "export", fake_log_export)
+    return captured_spans, captured_logs
+
+
+def test_span_attributes_are_curated_to_the_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_spans, _ = _capture_exports(monkeypatch)
+
+    with _otel_client() as otel_client:
+        response = otel_client.post("/v1/chat", json=VALID)
+    assert response.status_code == 200
+
+    chat_spans = [s for s in captured_spans if s.name == "POST /v1/chat"]
+    assert chat_spans, [s.name for s in captured_spans]
+    attrs = dict(chat_spans[0].attributes)
+
+    # Nothing outside docs/architecture.md section 6's allow-list survived -- specifically, none
+    # of the attributes FastAPI's/OpenTelemetry's auto-instrumentation adds by default that are
+    # not on that list (a real, unfiltered trace pulled from Tempo during Phase 9 development
+    # showed exactly these leaking: http.url, net.peer.ip, net.peer.port, http.user_agent).
+    assert set(attrs) <= telemetry.SPAN_ATTRIBUTE_ALLOWLIST
+    for leaked in ("net.peer.ip", "net.peer.port", "http.user_agent", "http.url", "http.route"):
+        assert leaked not in attrs, attrs
+
+    # The business attributes main.py's chat() handler sets explicitly (Phase 10) did survive,
+    # and http.route was renamed to the allow-list's "endpoint".
+    assert attrs["tenant_id"] == "demo"
+    assert attrs["request_id"]
+    assert attrs["model"] == "mock-1"
+    assert attrs["endpoint"] == "/v1/chat"
+    assert attrs["http.status_code"] == 200
+    assert isinstance(attrs["latency_ms"], float)
+    assert isinstance(attrs["prompt_tokens"], int)
+    assert isinstance(attrs["completion_tokens"], int)
+
+
+def test_log_attributes_reaching_otel_are_curated_to_the_same_allowlist_as_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Nothing in the app itself ever passes a disallowed field -- this is defence in depth,
+    # exactly like logging_setup.py's own stdout tests exercise LOG_FIELDS directly rather than
+    # only through application code.
+    _, captured_logs = _capture_exports(monkeypatch)
+
+    with _otel_client() as otel_client:
+        logging.getLogger("ai_service").warning(
+            "hypothetical leak",
+            extra={"tenant_id": "demo", "prompt": "must never reach Loki"},
+        )
+        otel_client.app.state.otel_logger_provider.force_flush()
+
+    assert captured_logs, "no log record was exported"
+    leaked_record = next(
+        (item for item in captured_logs if item.log_record.body == "hypothetical leak"), None
+    )
+    assert leaked_record is not None, "the test's own log line was not exported at all"
+    attrs = dict(leaked_record.log_record.attributes)
+    assert attrs.get("tenant_id") == "demo"
+    assert "prompt" not in attrs, attrs
+
+
+def test_log_records_reaching_otel_are_correlated_with_their_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_spans, captured_logs = _capture_exports(monkeypatch)
+
+    with _otel_client() as otel_client:
+        otel_client.post("/v1/chat", json=VALID)
+
+    chat_span = next(s for s in captured_spans if s.name == "POST /v1/chat")
+    chat_log = next(item for item in captured_logs if item.log_record.body == "chat completed")
+
+    assert chat_log.log_record.trace_id == chat_span.context.trace_id
+    assert chat_log.log_record.trace_id != 0
+
+
+def test_stdout_logs_carry_trace_id_only_while_otel_is_enabled_and_a_span_is_active(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # OTel disabled (the default): no span is ever started, so TraceContextFilter adds nothing.
+    with TestClient(create_app(Settings(log_format="json"))) as plain_client:
+        plain_client.post("/v1/chat", json=VALID)
+    plain_lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    assert plain_lines
+    assert not any("trace_id" in line for line in plain_lines)
+
+    # OTel enabled: the same "chat completed" line now carries the request's real trace/span id,
+    # in the same format Tempo uses, without needing to go through Loki first.
+    with _otel_client(log_format="json") as otel_client:
+        otel_client.post("/v1/chat", json=VALID)
+    otel_lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line]
+    chat_line = next(line for line in otel_lines if line["message"] == "chat completed")
+    assert re.fullmatch(r"[0-9a-f]{32}", chat_line["trace_id"])
+    assert re.fullmatch(r"[0-9a-f]{16}", chat_line["span_id"])
