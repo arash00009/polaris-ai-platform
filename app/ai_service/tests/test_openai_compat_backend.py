@@ -161,16 +161,53 @@ async def test_owned_client_is_closed_but_an_injected_client_is_not() -> None:
 
 
 # ---- readiness (GET <base_url>/models) -------------------------------------------------
+# _backend() configures the backend with model="tiny-model" (see the helper above), so a
+# response's "data" list must contain {"id": "tiny-model"} for check_ready() to pass -- Phase 11
+# tightened this from "the endpoint answered 200" to "and the configured model is in the list".
 
 
-async def test_check_ready_succeeds_when_the_models_endpoint_answers() -> None:
-    backend, seen = _backend(lambda _request: httpx.Response(200, json={"data": []}))
+async def test_check_ready_succeeds_when_the_configured_model_is_in_the_list() -> None:
+    backend, seen = _backend(
+        lambda _request: httpx.Response(
+            200, json={"data": [{"id": "other-model"}, {"id": "tiny-model"}]}
+        )
+    )
 
     await backend.check_ready()
 
     (request,) = seen
     assert request.method == "GET"
     assert request.url == "http://upstream.test/v1/models"
+
+
+async def test_check_ready_fails_when_the_configured_model_is_missing_from_the_list() -> None:
+    backend, _ = _backend(
+        lambda _request: httpx.Response(200, json={"data": [{"id": "other-model"}]})
+    )
+
+    with pytest.raises(BackendError, match="not loaded"):
+        await backend.check_ready()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not json at all",
+        {},
+        {"data": "not a list"},
+        {"data": [{"name": "tiny-model"}]},  # entries need an "id" key, not "name"
+        ["a", "list"],
+    ],
+)
+async def test_check_ready_fails_on_a_malformed_models_list(payload: object) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(payload, str):
+            return httpx.Response(200, text=payload)
+        return httpx.Response(200, json=payload)
+
+    backend, _ = _backend(handler)
+    with pytest.raises(BackendError, match="malformed"):
+        await backend.check_ready()
 
 
 async def test_check_ready_fails_on_an_http_error_without_leaking_the_body() -> None:

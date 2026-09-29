@@ -1,0 +1,50 @@
+# deploy/platform/model-serving/networkpolicy.yaml — Phase 11: default-deny ingress, plus an
+# explicit allow from polaris-dev only -- the one environment actually wired up to this shared
+# Ollama instance in this delivery (helm/ai-platform/values-dev.yaml). Same two-policy shape as
+# deploy/k8s/ai-service/networkpolicy.yaml (Phase 4): a podSelector: {} default-deny, and a
+# second policy scoping exactly what is allowed back in.
+#
+# If/when polaris-staging or polaris-prod are ever wired up to this same shared instance
+# (docs/architecture.md section 4.3 notes this is a RAM-constraint trade-off, not the production
+# shape), this policy's `from` list needs a matching namespaceSelector entry added -- it is not
+# automatic.
+#
+# Same caveat as deploy/k8s/ai-service/networkpolicy.yaml: not run against a real cluster from
+# this sandbox. scripts/bootstrap/model-serving.sh applies this LAST, after the Deployment is
+# already rolled out and Ready, and re-checks pod status afterwards for the same reason app.sh
+# does -- whether kubelet's own probe traffic is exempted from an "Ingress" policy is
+# implementation-specific, not something to assume works here just because it held for ai-service
+# on this same cluster's CNI (docs/troubleshooting.md, Phase 4).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-default-deny
+  namespace: model-serving
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: polaris
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ollama-allow-ingress
+  namespace: model-serving
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: polaris
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: polaris-dev
+      ports:
+        - protocol: TCP
+          port: 11434

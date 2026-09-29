@@ -1,8 +1,12 @@
 """OpenAICompatBackend: talks to any server that implements the OpenAI chat-completions API.
 
 Ollama, vLLM and many hosted services expose this API, so one client covers all of them.
-Status: implemented and unit-tested against a fake transport. It has NOT been run against a
-real model server yet; that happens in Phase 11.
+Status: implemented and unit-tested against a fake transport (test_openai_compat_backend.py).
+Phase 11 tightened check_ready() (see its docstring) and wires this backend up against a real
+Ollama server for the first time (deploy/platform/model-serving/) -- not yet re-confirmed against
+that real server from this sandbox (no cluster here); that is this phase's target-machine step,
+the same "unit-tested here, run for real there" split every earlier Kubernetes-facing phase in
+this project has followed.
 """
 
 import httpx
@@ -66,9 +70,18 @@ class OpenAICompatBackend(ModelBackend):
         )
 
     async def check_ready(self) -> None:
-        # Ollama, vLLM and other OpenAI-compatible servers answer GET <base>/models. A 200 means
-        # the server is up; it does not prove that the configured model is loaded. Phase 11
-        # may tighten this once it runs against a real server. Messages carry no URL or body.
+        """Confirm the backend is reachable AND that the configured model is actually loaded.
+
+        Ollama, vLLM and other OpenAI-compatible servers answer GET <base>/models with the
+        OpenAI API's own shape: {"object": "list", "data": [{"id": "<model-name>", ...}, ...]}.
+        Before Phase 11 this only checked that the endpoint answered 200 -- which proves the
+        server process is up, but not that POLARIS_OPENAI_MODEL is actually pulled/loaded there.
+        A mistyped model name, or one that was configured but never pulled, would have passed
+        GET /readyz and only surfaced as a 502 on the first real chat request. Phase 11 closes
+        that gap: it is testable now that a real model server exists to define the response
+        shape against (see test_openai_compat_backend.py). Messages carry no URL or upstream
+        body -- same discipline as generate() and the rest of this class.
+        """
         try:
             response = await self._client.get("models")
             response.raise_for_status()
@@ -78,6 +91,14 @@ class OpenAICompatBackend(ModelBackend):
             raise BackendError(f"model backend returned HTTP {exc.response.status_code}") from exc
         except httpx.RequestError as exc:
             raise BackendError("model backend unreachable") from exc
+
+        try:
+            data = response.json()
+            model_ids = {entry["id"] for entry in data["data"]}
+        except (ValueError, KeyError, TypeError) as exc:
+            raise BackendError("model backend returned a malformed models list") from exc
+        if self._model not in model_ids:
+            raise BackendError("configured model is not loaded on the model backend")
 
     async def aclose(self) -> None:
         if self._owns_client:

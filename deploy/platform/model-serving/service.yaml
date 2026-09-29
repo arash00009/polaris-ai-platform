@@ -1,0 +1,22 @@
+# deploy/platform/model-serving/service.yaml — Phase 11.
+#
+# ClusterIP only: nothing outside this cluster needs to reach Ollama directly, and the
+# NetworkPolicy in this same directory further restricts who inside the cluster may. The DNS
+# name this Service creates -- ollama.model-serving.svc.cluster.local -- is exactly what
+# helm/ai-platform/values-dev.yaml's POLARIS_OPENAI_BASE_URL points at.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: model-serving
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: polaris
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ollama
+  ports:
+    - name: http
+      port: 11434
+      targetPort: 11434

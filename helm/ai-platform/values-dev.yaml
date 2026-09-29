@@ -10,15 +10,29 @@ namespace: polaris-dev
 ingress:
   host: ai.localhost
 
-# Phase 9. Only dev turns these on in this delivery — same "prove it in one environment first"
-# pattern Phase 5 itself used before staging/prod existed. Turning them on here is only safe
-# AFTER deploy/platform/observability/ has been installed (see values.yaml's comments on
-# serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED, and the Phase 9 guide's step order) --
-# do not cherry-pick this block into values-staging.yaml/values-prod.yaml without installing the
-# observability stack in those clusters first too.
+# Phase 9/11. Only dev turns these on in this delivery — same "prove it in one environment first"
+# pattern Phase 5 itself used before staging/prod existed. Turning the OTel flags on here is only
+# safe AFTER deploy/platform/observability/ has been installed (see values.yaml's comments on
+# serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED, and the Phase 9 guide's step order);
+# turning the backend to "openai_compat" is only safe AFTER deploy/platform/model-serving/ has
+# been installed AND the configured model has been pulled (make model-serving-install, make
+# model-serving-pull — see docs/model-serving.md). Do not cherry-pick this block into
+# values-staging.yaml/values-prod.yaml without doing the matching install in those clusters first.
 config:
   POLARIS_ENVIRONMENT: "dev"
   POLARIS_OTEL_ENABLED: "true"
+  # Phase 11: a real model server instead of the mock. OLLAMA_MODEL below must match
+  # versions.env's OLLAMA_MODEL exactly (tests/bootstrap/test_static.sh checks this) — it is the
+  # model name Ollama reports back on GET /v1/models, which OpenAICompatBackend.check_ready() now
+  # verifies is actually loaded before GET /readyz reports ready (see that class's docstring).
+  # ollama.model-serving.svc.cluster.local is the DNS name deploy/platform/model-serving/
+  # service.yaml creates; no NetworkPolicy change was needed on this side (ai-service's own
+  # NetworkPolicy only restricts *ingress*, so its existing, unrestricted egress already reaches
+  # the model-serving namespace — model-serving's own NetworkPolicy is what actually restricts
+  # this, by only allowing ingress from polaris-dev).
+  POLARIS_BACKEND: "openai_compat"
+  POLARIS_OPENAI_BASE_URL: "http://ollama.model-serving.svc.cluster.local:11434/v1"
+  POLARIS_OPENAI_MODEL: "llama3.2:1b-instruct-q4_K_M"
 
 serviceMonitor:
   enabled: true

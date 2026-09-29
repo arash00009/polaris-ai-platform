@@ -869,5 +869,176 @@ else
   bad "logging_setup.py is missing TraceContextFilter or the trace_id/span_id LOG_FIELDS entries"
 fi
 
+# --- Phase 11: AI model serving (deploy/platform/model-serving/, scripts/bootstrap/model-serving.sh) ---
+
+# 82. Every deploy/platform/model-serving/*.yaml file parses as valid YAML (same "no helm/cluster
+# in this sandbox" reasoning as check 66's observability equivalent)
+MS_DIR="deploy/platform/model-serving"
+if have python3; then
+  if python3 -c "
+import sys, glob, yaml
+files = sorted(glob.glob('$MS_DIR/*.yaml'))
+ok = True
+for f in files:
+    try:
+        list(yaml.safe_load_all(open(f)))
+    except Exception as e:
+        print(f'{f}: {e}', file=sys.stderr)
+        ok = False
+sys.exit(0 if ok and files else 1)
+" 2>/tmp/ms-yaml-errors; then
+    ok "every $MS_DIR/*.yaml file parses as YAML"
+  else
+    bad "invalid YAML under $MS_DIR/: $(cat /tmp/ms-yaml-errors 2>/dev/null)"
+  fi
+fi
+
+# 83. namespace.yaml enforces Pod Security "baseline", not "restricted" -- deliberate (see its own
+# header comment and ADR-29): the upstream ollama/ollama image has not been verified to start
+# under "restricted" the way ai-service's own image was in Phase 3.
+if grep -q 'pod-security.kubernetes.io/enforce: baseline' "$MS_DIR/namespace.yaml" 2>/dev/null; then
+  ok "$MS_DIR/namespace.yaml enforces the baseline Pod Security Standard (see ADR-29 for why not restricted)"
+else
+  bad "$MS_DIR/namespace.yaml must set pod-security.kubernetes.io/enforce: baseline"
+fi
+
+# 84. deployment.yaml uses the __OLLAMA_IMAGE__ placeholder, never a hardcoded or floating image
+MS_DEPLOY="$MS_DIR/deployment.yaml"
+if [[ -f "$MS_DEPLOY" ]]; then
+  if grep -q '__OLLAMA_IMAGE__' "$MS_DEPLOY"; then ok "$MS_DEPLOY uses the __OLLAMA_IMAGE__ placeholder"; else bad "$MS_DEPLOY must reference the __OLLAMA_IMAGE__ placeholder, substituted by scripts/bootstrap/model-serving.sh"; fi
+  if grep -qE ':latest\b' "$MS_DEPLOY"; then bad "$MS_DEPLOY uses a ':latest' tag"; else ok "no ':latest' tag in $MS_DEPLOY"; fi
+else
+  bad "missing $MS_DEPLOY"
+fi
+
+# 85. versions.env: OLLAMA_IMAGE_TAG looks like a real, non-floating version
+if [[ "${OLLAMA_IMAGE_TAG:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  ok "OLLAMA_IMAGE_TAG=$OLLAMA_IMAGE_TAG"
+else
+  bad "OLLAMA_IMAGE_TAG is missing or not X.Y.Z (got '${OLLAMA_IMAGE_TAG:-}')"
+fi
+
+# 86. versions.env: OLLAMA_MODEL is a fully-qualified tag (name:tag-with-a-quantization-suffix),
+# never the bare "llama3.2:1b" which silently maps to whichever quantization Ollama's library
+# treats as that tag's default (see versions.env's own comment and ADR-29)
+if [[ "${OLLAMA_MODEL:-}" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+-[A-Za-z0-9._-]+$ ]]; then
+  ok "OLLAMA_MODEL=$OLLAMA_MODEL (fully-qualified, not a bare/floating tag)"
+else
+  bad "OLLAMA_MODEL must be a fully-qualified '<model>:<tag>-<quant>' reference, not a bare tag (got '${OLLAMA_MODEL:-}')"
+fi
+
+# 87. scripts/bootstrap/model-serving.sh exists and implements + dispatches all four subcommands
+MS_SCRIPT="scripts/bootstrap/model-serving.sh"
+if [[ -f "$MS_SCRIPT" ]]; then
+  ok "$MS_SCRIPT exists"
+  missing=""
+  for fn in cmd_install cmd_status cmd_pull_model cmd_uninstall; do
+    grep -q "^${fn}()" "$MS_SCRIPT" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$MS_SCRIPT implements install, status, pull-model and uninstall"
+  else
+    bad "$MS_SCRIPT is missing:$missing"
+  fi
+  dispatch="$(awk '/^CMD=/,0' "$MS_SCRIPT")"
+  missing=""
+  for fn in cmd_install cmd_status cmd_pull_model cmd_uninstall; do
+    grep -q "$fn" <<<"$dispatch" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$MS_SCRIPT's dispatch actually calls all four subcommands"
+  else
+    bad "$MS_SCRIPT defines but never dispatches to:$missing"
+  fi
+else
+  bad "$MS_SCRIPT is missing"
+fi
+
+# 88. Makefile: model-serving-install/-status/-pull/-uninstall exist and route to model-serving.sh
+for pair in "install:install" "status:status" "pull:pull-model" "uninstall:uninstall"; do
+  tgt="${pair%%:*}"; verb="${pair##*:}"
+  if grep -qE "^model-serving-${tgt}:" Makefile && grep -A1 "^model-serving-${tgt}:" Makefile | grep -q "model-serving.sh ${verb}"; then
+    ok "Makefile target: model-serving-$tgt"
+  else
+    bad "Makefile is missing model-serving-$tgt, or it does not call model-serving.sh $verb"
+  fi
+done
+
+# 89. values-dev.yaml switches polaris-dev to the real backend, and its model name matches
+# versions.env's OLLAMA_MODEL exactly (a mismatch would fail GET /readyz honestly, per ADR-29,
+# but should never happen silently in what is committed)
+VDEV="helm/ai-platform/values-dev.yaml"
+if grep -q 'POLARIS_BACKEND: "openai_compat"' "$VDEV" 2>/dev/null; then
+  ok "$VDEV switches config.POLARIS_BACKEND to openai_compat"
+else
+  bad "$VDEV must set config.POLARIS_BACKEND: \"openai_compat\""
+fi
+if grep -q "POLARIS_OPENAI_MODEL: \"${OLLAMA_MODEL:-__unset__}\"" "$VDEV" 2>/dev/null; then
+  ok "$VDEV's POLARIS_OPENAI_MODEL matches versions.env's OLLAMA_MODEL"
+else
+  bad "$VDEV's config.POLARIS_OPENAI_MODEL must equal versions.env's OLLAMA_MODEL ('${OLLAMA_MODEL:-}') exactly"
+fi
+if grep -q 'POLARIS_OPENAI_BASE_URL: "http://ollama.model-serving.svc.cluster.local:11434/v1"' "$VDEV" 2>/dev/null; then
+  ok "$VDEV points POLARIS_OPENAI_BASE_URL at the model-serving Service"
+else
+  bad "$VDEV must set config.POLARIS_OPENAI_BASE_URL to the model-serving namespace's Ollama Service"
+fi
+
+# 90. values.yaml (shared defaults) and values-staging.yaml/values-prod.yaml stay on the mock
+# backend -- only polaris-dev is wired up to Ollama in this delivery (see docs/model-serving.md)
+if grep -q 'POLARIS_BACKEND: "mock"' helm/ai-platform/values.yaml 2>/dev/null; then
+  ok "helm/ai-platform/values.yaml keeps the shared default backend as mock"
+else
+  bad "helm/ai-platform/values.yaml's shared config.POLARIS_BACKEND must stay \"mock\" -- only values-dev.yaml switches it"
+fi
+for env in staging prod; do
+  f="helm/ai-platform/values-$env.yaml"
+  if grep -q 'openai_compat' "$f" 2>/dev/null; then
+    bad "$f must not switch to openai_compat yet -- only polaris-dev is wired up to Ollama in this delivery"
+  else
+    ok "$f correctly stays on the mock backend"
+  fi
+done
+
+# 91. README.md: Phase 11's status row is no longer "Planned"
+if grep -E '^\| 11 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 11 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 11 status row still says Planned (or the row is missing/reworded)"
+fi
+
+# 92. docs/adr/README.md documents ADR-29
+if grep -q 'ADR-29' docs/adr/README.md; then
+  ok "docs/adr/README.md documents ADR-29"
+else
+  bad "docs/adr/README.md is missing ADR-29 (AI model serving decisions)"
+fi
+
+# 93. docs/troubleshooting.md and docs/component-qa.md have a Phase 11 section
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 11' "$f"; then
+    ok "$f has a Phase 11 section"
+  else
+    bad "$f is missing a Phase 11 section"
+  fi
+done
+
+# 94. docs/model-serving.md exists (named in this phase's own repository layout, same pattern as
+# docs/observability.md for Phase 9)
+if [[ -f docs/model-serving.md ]]; then
+  ok "docs/model-serving.md exists"
+else
+  bad "docs/model-serving.md is missing"
+fi
+
+# 95. openai_compat.py's check_ready() actually checks model membership, not just a 200 (Phase 11's
+# one real finding -- not just documented, wired into the code)
+OAC="app/ai_service/src/ai_service/backends/openai_compat.py"
+if grep -q 'model_ids' "$OAC" 2>/dev/null && grep -q 'not loaded on the model backend' "$OAC" 2>/dev/null; then
+  ok "openai_compat.py's check_ready() verifies the configured model is present in the models list"
+else
+  bad "openai_compat.py's check_ready() must verify the configured model is present in GET /models's response, not just that it answers 200"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

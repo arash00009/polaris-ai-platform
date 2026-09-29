@@ -29,7 +29,10 @@ image:
 replicaCount: 2
 
 # Non-secret POLARIS_* settings — identical to deploy/k8s/ai-service/configmap.yaml. Every
-# environment runs the mock backend until Phase 11 wires a real model server.
+# environment runs the mock backend at this shared-defaults level; Phase 11 wires a real model
+# server (deploy/platform/model-serving/) and switches POLARIS_BACKEND to "openai_compat" only in
+# values-dev.yaml, the same "prove it in one environment first" pattern Phase 9's OTel flags used
+# — see docs/model-serving.md for why staging/prod stay on mock in this delivery.
 config:
   POLARIS_BACKEND: "mock"
   POLARIS_LOG_LEVEL: "INFO"
@@ -50,7 +53,10 @@ config:
 # docs/component-qa.md). Identical across environments — Phase 5 varies replica count and the
 # disruption budget per environment (legitimate operational knobs), not resource numbers nobody
 # has measured. Phase 9 makes the real numbers available (Prometheus CPU/memory history per pod)
-# but does not itself replace these — see values-prod.yaml's comment. Still open for Phase 11.
+# but does not itself replace these — see values-prod.yaml's comment. Phase 11 gives ai-service
+# a genuinely different workload profile (a real, slower backend call instead of the mock's
+# near-instant one), which is worth re-measuring against once real dev traffic exists — but does
+# not do that re-measurement itself; still an open follow-up, not resolved by this phase.
 resources:
   requests:
     cpu: 50m

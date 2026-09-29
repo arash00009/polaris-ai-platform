@@ -1,0 +1,25 @@
+# deploy/platform/model-serving/namespace.yaml — Phase 11.
+#
+# pod-security.kubernetes.io/enforce: baseline, not restricted — same reasoning as
+# deploy/platform/observability/namespace.yaml (Phase 9): "restricted" was only put on
+# polaris-dev/-staging/-prod after Phase 3 actually verified, on the target machine, that
+# ai-service's own image runs non-root, capability-dropped, with a read-only root filesystem
+# (make image-check). Nothing here has done the equivalent check against the upstream
+# ollama/ollama image — the Deployment below asks for a non-root UID, dropped capabilities and no
+# privilege escalation as best-effort hardening (see deployment.yaml's securityContext comments),
+# but whether the upstream image actually starts under those restrictions has not been run for
+# real yet (no cluster in the sandbox this was written in). Enforcing "restricted" here and being
+# wrong about it would fail the pod outright with an admission error instead of a normal
+# CrashLoopBackOff, which is a worse failure mode for a first real run. Tightening this to
+# "restricted" once verified is a named follow-up (docs/troubleshooting.md, ADR-29), not silently
+# skipped.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: model-serving
+  labels:
+    app.kubernetes.io/part-of: polaris
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

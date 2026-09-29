@@ -1,0 +1,33 @@
+# deploy/platform/model-serving/pvc.yaml — Phase 11.
+#
+# A deliberate exception to this project's usual "ephemeral by design" posture (ADR-11; Tempo/
+# Loki run without persistence, torn down and rebuilt freely). Model blobs are different: a
+# ~800 MB-1.3 GB download is expensive in time and bandwidth to reproduce, and nothing about a
+# pulled model is meaningfully "stateful" in the way that would make re-pulling it on every pod
+# restart a virtue — unlike a trace or a log line, there is exactly one correct value for "the
+# bytes of this model", and re-fetching it after every restart only wastes time. A PersistentVolumeClaim
+# means `ollama pull` (scripts/bootstrap/model-serving.sh pull-model) only has to run once; a pod
+# restart re-attaches the same volume and starts serving immediately. See ADR-29.
+#
+# No storageClassName: uses the cluster's default StorageClass. k3s ships local-path-provisioner
+# enabled by default (deploy/k3d/cluster.yaml sets no --disable flag for it), which is sufficient
+# for a single-node-affinity local volume — the same default every other stateful component in
+# this local cluster would also fall back to if it needed one.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: model-serving
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: polaris
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # docs/architecture.md's own estimate for "Ollama with a <= 1B-parameter model": 2-3 GB.
+      # 5Gi leaves headroom for the model blob, its manifest/config layers, and Ollama's own
+      # small amount of runtime state, without being a large ask on a local-path (host-disk-
+      # backed) volume.
+      storage: 5Gi

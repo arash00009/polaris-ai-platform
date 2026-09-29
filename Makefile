@@ -23,7 +23,8 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	verify-dev verify-staging verify-prod \
 	argocd-install argocd-status argocd-password argocd-uninstall gitops-bootstrap \
 	gitops-bump-dev gitops-bump-staging gitops-bump-prod \
-	obs-install obs-status obs-password obs-grafana obs-dashboard-configmap obs-uninstall
+	obs-install obs-status obs-password obs-grafana obs-dashboard-configmap obs-uninstall \
+	model-serving-install model-serving-status model-serving-pull model-serving-uninstall
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -262,3 +263,20 @@ obs-dashboard-configmap: ## Regenerate dashboards/ai-service-dashboard-configmap
 
 obs-uninstall: ## Remove the observability stack (polaris-dev/-staging/-prod are untouched)
 	./scripts/bootstrap/observability.sh uninstall
+
+# --- Phase 11: AI model serving (Ollama) --------------------------------------------------------
+# Its own 'model-serving' namespace, same pattern as obs-*/argocd-* above. Install this, then
+# pull the configured model, BEFORE setting config.POLARIS_BACKEND to "openai_compat" for any
+# environment (already done in helm/ai-platform/values-dev.yaml) — see docs/model-serving.md.
+
+model-serving-install: ## Install the Ollama model server into the model-serving namespace (needs: make cluster-up)
+	./scripts/bootstrap/model-serving.sh install
+
+model-serving-status: ## Show the model server's Deployment/pods/PVC/Service and which models are pulled
+	./scripts/bootstrap/model-serving.sh status
+
+model-serving-pull: ## Pull the configured model (versions.env: OLLAMA_MODEL) into the running server
+	./scripts/bootstrap/model-serving.sh pull-model
+
+model-serving-uninstall: ## Remove the model server (deletes the pulled model along with its PVC)
+	./scripts/bootstrap/model-serving.sh uninstall

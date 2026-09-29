@@ -1,0 +1,108 @@
+# deploy/platform/model-serving/deployment.yaml — Phase 11.
+#
+# ONE replica: docs/architecture.md section 4.3 is explicit that this is a single shared Ollama
+# instance across dev/staging/prod, a RAM-constraint trade-off for a local machine (a real
+# production platform would run model serving per-environment, or per-tenant — documented, not
+# built here, see docs/model-serving.md). A single replica also means no PodDisruptionBudget is
+# declared: a minAvailable: 1 budget on a one-replica workload would simply block every voluntary
+# disruption (node drain, cluster upgrade) outright rather than smooth it — a real trade-off,
+# named here rather than silently copied from ai-service's own PDB.
+#
+# __OLLAMA_IMAGE__ is substituted by scripts/bootstrap/model-serving.sh (sed, the same pattern
+# scripts/deploy/app.sh already uses for __AI_SERVICE_IMAGE__) with ollama/ollama:$OLLAMA_IMAGE_TAG
+# from versions.env — never hand-edit an image reference into this file directly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: model-serving
+  labels:
+    app.kubernetes.io/name: ollama
+    app.kubernetes.io/part-of: polaris
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ollama
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ollama
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # Best-effort hardening (see namespace.yaml's comment on why the namespace itself
+        # enforces only "baseline", not "restricted", until this is confirmed to actually work
+        # against the real upstream image on a real cluster).
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ollama
+          image: __OLLAMA_IMAGE__
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # Not set to true (unlike ai-service's own deployment.yaml): Ollama's own runtime
+            # needs, beyond the model directory below, have not been fully inventoried against a
+            # real run -- guessing wrong here would fail the container outright. A named,
+            # honest gap, not the same hardening level ai-service's own image has (Phase 3
+            # verified that one with make image-check; this has not had the equivalent check).
+            readOnlyRootFilesystem: false
+          ports:
+            - name: http
+              containerPort: 11434
+          env:
+            # Explicit rather than relying on the image's own default -- see docs/troubleshooting.md
+            # Phase 11 if this needs revisiting after a real run.
+            - name: OLLAMA_HOST
+              value: "0.0.0.0:11434"
+            # Both point at the PVC mount below: OLLAMA_MODELS is where Ollama stores pulled model
+            # blobs; HOME covers whatever other small config/cache files the process writes as the
+            # non-root UID above (it has no real "home directory" of its own otherwise).
+            - name: OLLAMA_MODELS
+              value: /models
+            - name: HOME
+              value: /models
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          # docs/architecture.md's own estimate for a <=1B-parameter CPU model: 2-3 GB. The
+          # request is lower than the limit: an idle server with no model loaded yet has a small
+          # footprint; a loaded 1B (q4) model plus its KV cache and the Go runtime can approach
+          # the top of that range under load. Not load-tested -- the same "starting estimate,
+          # not measured" honesty every other resources block in this project already carries
+          # (ADR-22, docs/component-qa.md).
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          # No startupProbe: unlike ai-service, the ollama server process itself starts in
+          # seconds -- it is the model *pull* that is slow, and that happens as a separate,
+          # explicit step (scripts/bootstrap/model-serving.sh pull-model) after the pod is
+          # already Ready, not something pod readiness gates on.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 11434
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 6
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
