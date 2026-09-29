@@ -102,7 +102,7 @@ grafana:
       type: tempo
       uid: tempo
       access: proxy
-      url: http://tempo.observability.svc.cluster.local:3100
+      url: http://tempo.observability.svc.cluster.local:3200
   # The sidecar watches ConfigMaps labelled grafana_dashboard=1 in every namespace and loads them
   # automatically -- see dashboards/ai-service-dashboard-configmap.yaml's label. No manual import.
   sidecar:
