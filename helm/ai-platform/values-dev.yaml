@@ -33,6 +33,13 @@ config:
   POLARIS_BACKEND: "openai_compat"
   POLARIS_OPENAI_BASE_URL: "http://ollama.model-serving.svc.cluster.local:11434/v1"
   POLARIS_OPENAI_MODEL: "llama3.2:1b-instruct-q4_K_M"
+  # A cold Ollama model load measured ~37s on the target machine (see
+  # docs/troubleshooting.md, Phase 11) -- comfortably past the 30s default in
+  # app/ai_service/src/ai_service/config.py's backend_timeout_s. 90s leaves real margin
+  # over that single, resource-constrained measurement without needing a cleaner baseline
+  # first. Dev-only: staging/prod stay on the mock backend (see above), so their values
+  # files keep the 30s default untouched.
+  POLARIS_BACKEND_TIMEOUT_S: "90"
 
 serviceMonitor:
   enabled: true

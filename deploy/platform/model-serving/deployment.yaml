@@ -68,6 +68,14 @@ spec:
               value: /models
             - name: HOME
               value: /models
+            # Ollama's own default unloads an idle model after 5 minutes, and reloading it
+            # costs a real, measured ~37s on this machine (docs/troubleshooting.md, Phase 11)
+            # -- long enough to matter for a demo someone is watching live. "-1" keeps it
+            # loaded indefinitely once pulled; the resources block above already budgets for
+            # a loaded model (not an idle one), so this does not change the memory picture,
+            # just how often that memory actually gets used.
+            - name: OLLAMA_KEEP_ALIVE
+              value: "-1"
           volumeMounts:
             - name: models
               mountPath: /models
