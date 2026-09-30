@@ -56,7 +56,12 @@ need_kubectl() {
 
 ollama_image() {
   local tag="${OLLAMA_IMAGE_TAG:?OLLAMA_IMAGE_TAG is empty in versions.env}"
-  printf 'ollama/ollama:%s' "$tag"
+  local registry="${OLLAMA_IMAGE_REGISTRY:-}"
+  if [[ -n "$registry" ]]; then
+    printf '%s/ollama/ollama:%s' "$registry" "$tag"
+  else
+    printf 'ollama/ollama:%s' "$tag"
+  fi
 }
 
 cmd_install() {
