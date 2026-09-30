@@ -6,19 +6,20 @@ against a fake transport) wired up against it for the first time — currently i
 only. `docs/architecture.md` section 18's exact "Done when" wording for this phase: *"Ollama
 serves a small model; service uses `OpenAICompatBackend`; serving trade-offs documented."*
 
-**Verified state: written and unit-tested in the sandbox (2026-09-29). Not yet installed or run
-on the target machine.** `app/ai_service`'s test suite grew from 145 to 151 tests (98.76 %
-coverage, ruff clean); the six new tests exercise this phase's one real code change —
-`OpenAICompatBackend.check_ready()` now verifies the configured model is actually present in the
-backend's `/v1/models` response, not just that the endpoint answers 200 (see 2.2 below). Every
-Kubernetes-facing piece of this phase (the `model-serving` namespace, the Ollama Deployment/PVC/
-Service/NetworkPolicy, `scripts/bootstrap/model-serving.sh`) is written and its YAML validated for
-real (`python3 -c "import yaml..."`, the same syntax check every earlier phase's sandbox-only
-Kubernetes work has used), but none of it has run against a real cluster — there is no Docker
-daemon and no cluster in this sandbox (confirmed by trying, not assumed; see
-`docs/troubleshooting.md`). Installing it, pulling the model, and confirming a real chat request
-answers correctly are this phase's target-machine step, the same order every earlier
-Kubernetes-touching phase in this project has followed.
+**Verified state: confirmed on the target machine, 2026-09-29/30.** `app/ai_service`'s test suite
+grew from 145 to 151 tests (98.76 % coverage, ruff clean) in the sandbox; the six new tests
+exercise this phase's one real code change — `OpenAICompatBackend.check_ready()` now verifies the
+configured model is actually present in the backend's `/v1/models` response, not just that the
+endpoint answers 200 (see 2.2 below). Every Kubernetes-facing piece of this phase (the
+`model-serving` namespace, the Ollama Deployment/PVC/Service/NetworkPolicy,
+`scripts/bootstrap/model-serving.sh`) was then installed for real on the target machine, the model
+pulled for real (807 MB, matching the 808 MB estimate), and a real `/v1/chat` request answered
+correctly end to end — its trace confirmed in Tempo and its logs in Loki by
+`trace_id`/`request_id`. Two real bugs were found and fixed along the way, both re-verified live
+in the cluster: the k3d agent nodes cannot resolve Docker Hub directly (fixed with a new
+`OLLAMA_IMAGE_REGISTRY` fallback to the local k3d registry, §2.1), and a cold model load measured
+~50.5s for real (fixed with `POLARIS_BACKEND_TIMEOUT_S=90` and `OLLAMA_KEEP_ALIVE=-1`, §4/§5). See
+`docs/troubleshooting.md`'s Phase 11 section for the full real evidence.
 
 ## 1. Architecture
 
@@ -85,6 +86,13 @@ reaching for Helm to avoid — see that phase's own reasoning, ADR-23).
   NetworkPolicy last and re-check readiness — the same ordering `scripts/deploy/app.sh` uses and
   for the same reason (Phase 4's `docs/troubleshooting.md` row on kubelet probe traffic and
   `NetworkPolicy`).
+- **`OLLAMA_IMAGE_REGISTRY` (new, `versions.env`)** — confirmed, on the target machine, that this
+  network's k3d agent nodes cannot resolve Docker Hub directly (a DNS failure;
+  `docs/troubleshooting.md`'s Phase 11 section has the exact error). Empty by default (pulls
+  straight from Docker Hub, the documented, unmodified path); set to `registry.localhost:5000` —
+  k3d's own local registry, created automatically with every cluster — as this network's confirmed
+  fallback. `ollama_image()` in `scripts/bootstrap/model-serving.sh` prefixes it onto the image
+  reference when set.
 
 ### 2.2 `OpenAICompatBackend.check_ready()` is now stricter
 
@@ -137,7 +145,7 @@ again.
 | Model | `llama3.2:1b-instruct-q4_K_M` (Meta Llama 3.2, 1B parameters, 4-bit quantized, 808 MB) | Whatever size/precision the workload needs — routinely 7B-70B+, fp16/bf16 or a production-grade quantization, on GPU memory rather than host RAM |
 | Concurrency | One shared instance across (currently) one environment; Ollama serializes/queues requests on CPU | Batched, GPU-accelerated concurrent inference; horizontal scaling via replica count and/or model sharding |
 | Autoscaling | None — a fixed one-replica Deployment | HPA/KEDA on queue depth, latency and GPU utilization, plus a cluster/node autoscaler for GPU node pools (`docs/architecture.md` section 16) |
-| Latency | Not yet measured for real (target-machine step). `docs/architecture.md`'s own SLO note: p95 ≤ 5s for Ollama CPU vs ≤ 300ms for the mock — CPU inference is materially slower, and this phase's honest job is to confirm that number for real, not assume it | Single-digit-to-tens-of-milliseconds per token, GPU-dependent |
+| Latency | **Measured for real, target machine, 2026-09-29:** cold start (first request after a pod restart, no warm model in memory) 50,454 ms (~50.5s); warm follow-up 3,443.9 ms (~3.4s). The warm number clears `docs/architecture.md`'s ≤5s p95 SLO note comfortably; the cold number does not, but is a one-time-per-pod-lifetime cost, not steady state — `OLLAMA_KEEP_ALIVE=-1` (§2.1) keeps the model resident so it is paid once, and `POLARIS_BACKEND_TIMEOUT_S=90` (§5) gives real margin over it either way | Single-digit-to-tens-of-milliseconds per token, GPU-dependent |
 | GPU telemetry | **Not implemented — there is no GPU on this machine.** Documented only, never faked: DCGM Exporter → Prometheus → Grafana is the real production pattern (NVIDIA's own exporter, scraped the same way `kube-prometheus-stack` already scrapes everything else in this project). `docs/architecture.md` section 8 is explicit that simulated GPU graphs would be dishonest, and none are shown here | NVIDIA DCGM Exporter, Prometheus, Grafana — same stack this project already runs, one more scrape target |
 | Model versioning | A single, hand-pinned tag in `versions.env` (`OLLAMA_MODEL`) | A model registry (Phase 16: Git manifest first, MLflow optional) with versioned artifacts, rollback, and A/B or canary rollout of a new model version |
 | Serving-engine swap | Configuration only (`POLARIS_BACKEND`, `POLARIS_OPENAI_BASE_URL`, `POLARIS_OPENAI_MODEL`) — the whole point of the `ModelBackend` interface since Phase 2 | Same principle at larger scale: vLLM, Triton and NIM all speak (or can front) an OpenAI-compatible API, so this project's own `OpenAICompatBackend` needs no code change to point at any of them, only different configuration |
@@ -167,7 +175,13 @@ claim that it is provably the best choice for this hardware.
 | `POLARIS_OPENAI_BASE_URL` | `http://ollama.model-serving.svc.cluster.local:11434/v1` | The in-cluster Ollama Service, OpenAI-compatible path |
 | `POLARIS_OPENAI_MODEL` | `llama3.2:1b-instruct-q4_K_M` | Must match `versions.env`'s `OLLAMA_MODEL` exactly — `tests/bootstrap/test_static.sh` checks this, and a mismatch now fails `GET /readyz` honestly (section 2.2) instead of only a chat request |
 | `POLARIS_OPENAI_API_KEY` | unset | Ollama needs no authentication locally; the field exists (`SecretStr`, never logged) for a hosted OpenAI-compatible service that does |
-| `POLARIS_BACKEND_TIMEOUT_S` | unchanged, `30.0` default | Comfortably above the ≤5s CPU-inference SLO target above; not tightened this phase pending a real measured latency |
+| `POLARIS_BACKEND_TIMEOUT_S` | `90` (dev only) | Raised from the 30.0 default after a real cold-start measurement of ~50.5s (§4) exceeded it; staging/prod stay on the mock backend and keep the 30.0 default (`values-staging.yaml`/`values-prod.yaml` untouched) |
+
+Separately, `deploy/platform/model-serving/deployment.yaml` sets `OLLAMA_KEEP_ALIVE=-1` directly on
+the Ollama Deployment (not a `POLARIS_*` `ai_service` variable) — keeps a pulled model resident in
+memory indefinitely instead of Ollama's own 5-minute idle-unload default, confirmed live in the
+cluster (`kubectl -n model-serving get pod ... -o jsonpath='{...env}'` shows
+`OLLAMA_KEEP_ALIVE: "-1"`).
 
 `values.yaml`'s shared defaults, and `values-staging.yaml`/`values-prod.yaml`, are **unchanged** —
 every environment except `polaris-dev` still runs `MockBackend`. Extending this to
@@ -178,29 +192,26 @@ instance") or per-environment instances this local machine likely cannot afford 
 
 ## 6. Known limitations, honestly
 
-- **This entire phase is unverified against a real cluster.** There is no Docker daemon and no
-  cluster in the sandbox this was written in (confirmed by trying `docker pull hello-world`, not
-  assumed). Installing it, pulling the model, and sending a real chat request through it are the
-  next real steps — see the HANDOFF section of the Claude Project doc for this phase.
-- **The non-root `securityContext` in `deployment.yaml` is unverified.** The upstream
-  `ollama/ollama` image was not built with a specific non-root UID in mind the way this project's
-  own `ai-service` image was (Phase 3, `make image-check`). If the pod fails to start under it,
-  `docs/troubleshooting.md`'s Phase 11 section has the documented fallback.
-- **`OLLAMA_IMAGE_TAG` (`0.34.4`) is pinned from a real GitHub releases page, but the exact
-  Docker Hub tag spelling is inferred, not directly confirmed** — this sandbox cannot reach
-  `hub.docker.com` either (see `versions.env`'s own comment). A "manifest unknown" error on
-  install is the signal to re-check and correct it.
+- **The k3d agent nodes on this network cannot resolve Docker Hub directly** — confirmed via a
+  DNS failure (`kubectl describe pod` showed `lookup auth.docker.io: no such host`;
+  `docs/troubleshooting.md`'s Phase 11 section has the exact error). Worked around with
+  `OLLAMA_IMAGE_REGISTRY` (§2.1, pointing at k3d's own local registry instead), not fixed at the
+  network level — a different network might not need this fallback at all.
 - **`ai-service`'s own resource requests/limits are not re-measured for a real backend call.**
   They remain the Phase 3 `docker run` estimate, unrelated to how long an Ollama CPU inference
   actually takes end-to-end through the full request path.
-- **Latency is not yet measured for real.** `docs/architecture.md`'s "p95 ≤ 5s for Ollama CPU" is
-  a target this phase is meant to confirm, not a number already observed.
 - **GPU telemetry is documented only — no GPU exists on this machine, and no simulated GPU data
   is shown anywhere** (`docs/architecture.md` section 8's explicit rule).
 - **`polaris-staging`/`polaris-prod` are not wired up to Ollama.** They stay on `MockBackend`
   (section 5 above).
 
+Everything else this section previously listed as unverified is now confirmed on the target
+machine (2026-09-29/30): the non-root `securityContext` in `deployment.yaml` runs the `ollama`
+pod fine, unmodified; `OLLAMA_IMAGE_TAG=0.34.4`'s Docker Hub tag spelling was correct (the real
+blocker was DNS resolution from the k3d nodes, the bullet above, not the tag); and latency is now
+measured for real (§4).
+
 See ADR-29 for the full reasoning behind every default and simplification named above, and
-`docs/troubleshooting.md`'s Phase 11 section for what was actually found while building this
-(the `check_ready()` gap, mainly) versus what remains an *expected* failure mode until it is
-reproduced for real on the target machine.
+`docs/troubleshooting.md`'s Phase 11 section for everything actually found while building and then
+confirming this phase for real — the `check_ready()` gap found in the sandbox, and the
+DNS/registry and cold-start/timeout findings from the target machine.

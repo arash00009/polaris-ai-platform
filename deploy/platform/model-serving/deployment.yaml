@@ -69,7 +69,7 @@ spec:
             - name: HOME
               value: /models
             # Ollama's own default unloads an idle model after 5 minutes, and reloading it
-            # costs a real, measured ~37s on this machine (docs/troubleshooting.md, Phase 11)
+            # costs a real, measured ~50s on this machine (docs/troubleshooting.md, Phase 11)
             # -- long enough to matter for a demo someone is watching live. "-1" keeps it
             # loaded indefinitely once pulled; the resources block above already budgets for
             # a loaded model (not an idle one), so this does not change the memory picture,
