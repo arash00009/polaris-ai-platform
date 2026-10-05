@@ -24,7 +24,10 @@ ROOT="$(repo_root)"
 cd "$ROOT"
 
 APP_DIR="app/ai_service"
+GATEWAY_DIR="app/gateway"
+CHART_DIR="helm/ai-platform"
 IMAGE_REPO="polaris/ai-service"
+GATEWAY_IMAGE_REPO="polaris/ai-gateway"
 CLUSTER_CONFIG="deploy/k3d/cluster.yaml"
 ENVIRONMENTS=(dev staging prod)
 
@@ -32,6 +35,9 @@ ENVIRONMENTS=(dev staging prod)
 # image.sh / scripts/deploy/app.sh) rather than shared — a change here must never alter a
 # previous phase's already-verified script (ADR-22).
 app_version() { awk -F'"' '/^version = / {print $2; exit}' "$APP_DIR/pyproject.toml"; }
+# Phase 12: same reasoning for the gateway's own version, duplicated again from
+# scripts/deploy/helm.sh's gateway_version() -- two separate packages, two separate versions.
+gateway_version() { awk -F'"' '/^version = / {print $2; exit}' "$GATEWAY_DIR/pyproject.toml"; }
 app_revision() {
   local rev
   rev="$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
@@ -40,13 +46,27 @@ app_revision() {
   printf '%s' "$rev"
 }
 
+# Phase 12: whether $1's values file turns the gateway on -- duplicated from
+# scripts/deploy/helm.sh's gateway_enabled_for() (same reasoning, ADR-22). Read from
+# polaris-ai-platform's own chart dir (not $GITOPS_DIR): gateway.enabled is a chart default
+# baked into values-$1.yaml, not something polaris-gitops overrides per environment.
+gateway_enabled_for() {
+  awk '/^gateway:/{f=1; next} f && /^[a-z]/{f=0} f && /enabled:/{print $2; exit}' "$CHART_DIR/values-$1.yaml"
+}
+
 VERSION="$(app_version)"
 REVISION="$(app_revision)"
 TAG="$VERSION-$REVISION"
+# Same git revision as ai-service's own TAG (one commit, one repo, one revision string) --
+# only the version number differs, since app/gateway/pyproject.toml versions independently of
+# app/ai_service/pyproject.toml (two separate packages, see gateway/config.py's docstring).
+GATEWAY_VERSION="$(gateway_version)"
+GATEWAY_TAG="$GATEWAY_VERSION-$REVISION"
 
 REG_NAME="$(awk '/create:/{f=1} f && /name:/{print $2; exit}' "$CLUSTER_CONFIG")"
 [[ -n "$REG_NAME" ]] || die "Could not read the registry name from $CLUSTER_CONFIG"
 IMAGE_REPOSITORY="$REG_NAME:5000/$IMAGE_REPO"
+GATEWAY_IMAGE_REPOSITORY="$REG_NAME:5000/$GATEWAY_IMAGE_REPO"
 
 need_env() {
   local env="${1:-}"
@@ -61,6 +81,17 @@ need_pushed() {
   tags="$(curl -fsS "http://localhost:5000/v2/$IMAGE_REPO/tags/list" 2>/dev/null || true)"
   if ! grep -q "\"$TAG\"" <<<"$tags"; then
     die "Tag $TAG is not in the local registry (localhost:5000). Run: make image-build && make image-push"
+  fi
+}
+
+# Phase 12: same check for the gateway's image, only run when $1's chart values actually turn
+# the gateway on (today: dev only) -- staging/prod never need this image pushed at all.
+need_pushed_gateway() {
+  have curl || die "curl not found. Run 'make doctor'."
+  local tags
+  tags="$(curl -fsS "http://localhost:5000/v2/$GATEWAY_IMAGE_REPO/tags/list" 2>/dev/null || true)"
+  if ! grep -q "\"$GATEWAY_TAG\"" <<<"$tags"; then
+    die "Tag $GATEWAY_TAG is not in the local registry (localhost:5000). Run: make gateway-image-build && make gateway-image-push"
   fi
 }
 
@@ -80,18 +111,42 @@ IMAGE_FILE="$GITOPS_DIR/environments/$ENV/image.yaml"
 
 need_pushed
 
+# Phase 12: until this phase, Argo CD's render of $ENV never needed anything beyond
+# ai-service's own tag -- gateway.image.tag has no chart default (same ADR-19 reasoning as
+# ai-service's tag) and was never supplied here, which is exactly the gap that produced a real
+# "gateway.image.tag is required" ComparisonError on dev the first time gateway.enabled: true
+# reached values-dev.yaml (see docs/troubleshooting.md, Phase 12). GATEWAY_ON gates both the
+# registry check and the extra YAML block below so staging/prod (gateway.enabled: false) never
+# need the gateway image pushed or mentioned at all.
+GATEWAY_ON="$(gateway_enabled_for "$ENV")"
+if [[ "$GATEWAY_ON" == "true" ]]; then
+  need_pushed_gateway
+fi
+
 log_info "bumping $ENV -> $IMAGE_REPOSITORY:$TAG in $IMAGE_FILE"
-cat > "$IMAGE_FILE" <<EOF
+{
+  cat <<EOF
 # environments/$ENV/image.yaml — the only field this Application source contributes (see
 # apps/$ENV-app.yaml): helm/ai-platform/values.yaml deliberately has no default image.tag
 # (ADR-19), so Argo CD supplies it from here instead of a human running 'helm --set
 # image.tag=...' by hand. Written by scripts/gitops/bump-image-tag.sh in polaris-ai-platform —
 # do not hand-edit the tag without also running 'make image-build && make image-push' there, or
-# Argo CD will sync to an image that does not exist in the local registry.
+# Argo CD will sync to an image that does not exist in the local registry. Phase 12: the same
+# goes for the gateway block below (make gateway-image-build && make gateway-image-push) -- it
+# only appears for an environment whose chart values turn gateway.enabled on.
 image:
   repository: $IMAGE_REPOSITORY
   tag: "$TAG"
 EOF
+  if [[ "$GATEWAY_ON" == "true" ]]; then
+    cat <<EOF
+gateway:
+  image:
+    repository: $GATEWAY_IMAGE_REPOSITORY
+    tag: "$GATEWAY_TAG"
+EOF
+  fi
+} > "$IMAGE_FILE"
 
 log_ok "wrote $IMAGE_FILE"
 
@@ -107,7 +162,11 @@ if [[ "$PUSH" -eq 1 ]]; then
   if git -C "$GITOPS_DIR" diff --cached --quiet -- "environments/$ENV/image.yaml"; then
     log_ok "$ENV in $GITOPS_DIR is already at $TAG — nothing to commit or push."
   else
-    if ! git -C "$GITOPS_DIR" commit -m "chore($ENV): bump image tag to $TAG"; then
+    COMMIT_MSG="chore($ENV): bump image tag to $TAG"
+    if [[ "$GATEWAY_ON" == "true" ]]; then
+      COMMIT_MSG="chore($ENV): bump image tags to $TAG (ai-service), $GATEWAY_TAG (ai-gateway)"
+    fi
+    if ! git -C "$GITOPS_DIR" commit -m "$COMMIT_MSG"; then
       die "git commit failed in $GITOPS_DIR — is it a clean checkout with a remote configured?"
     fi
     if ! git -C "$GITOPS_DIR" push; then

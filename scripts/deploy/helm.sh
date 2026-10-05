@@ -97,10 +97,13 @@ gateway_enabled_for() {
 gateway_api_keys_json_for() {
   local file="$GATEWAY_KEYS_DIR/api-keys.$1.local.json"
   if [[ -f "$file" ]]; then
-    cat "$file"
+    printf '%s' "$file"
   else
     log_warn "no $file -- gateway will start with zero API keys (every /v1/chat request 401s). See $GATEWAY_KEYS_DIR/api-keys.$1.example.json." >&2
-    printf '{}'
+    local fallback
+    fallback="$(mktemp)"
+    printf '{}' > "$fallback"
+    printf '%s' "$fallback"
   fi
 }
 
@@ -190,7 +193,7 @@ cmd_apply() {
     gateway_args=(
       --set "gateway.image.repository=$GATEWAY_CLUSTER_REPO"
       --set "gateway.image.tag=$GATEWAY_TAG"
-      --set-string "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")"
+      --set-file "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")"
     )
   fi
 
