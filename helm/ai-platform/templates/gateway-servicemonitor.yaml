@@ -1,0 +1,20 @@
+# helm/ai-platform/templates/gateway-servicemonitor.yaml — Phase 12. Same reasoning as
+# templates/servicemonitor.yaml (Phase 9) -- a ServiceMonitor CRD, same namespace as the
+# Service it targets, guarded so it never renders before kube-prometheus-stack's CRD exists.
+{{- if and .Values.gateway.enabled .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-gateway
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "ai-platform.gatewaySelectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

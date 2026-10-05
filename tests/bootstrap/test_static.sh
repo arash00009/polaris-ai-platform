@@ -1040,5 +1040,184 @@ else
   bad "openai_compat.py's check_ready() must verify the configured model is present in GET /models's response, not just that it answers 200"
 fi
 
+# --- Phase 12: API gateway (app/gateway/, helm gateway-*.yaml, scripts/build/gateway-image.sh) ---
+
+# 96. app/gateway's package and test layout exists
+for f in \
+  app/gateway/pyproject.toml \
+  app/gateway/requirements.txt \
+  app/gateway/requirements-dev.txt \
+  app/gateway/Dockerfile \
+  app/gateway/src/gateway/__init__.py \
+  app/gateway/src/gateway/config.py \
+  app/gateway/src/gateway/schemas.py \
+  app/gateway/src/gateway/auth.py \
+  app/gateway/src/gateway/ratelimit.py \
+  app/gateway/src/gateway/logging_setup.py \
+  app/gateway/src/gateway/telemetry.py \
+  app/gateway/src/gateway/main.py \
+  app/gateway/tests/conftest.py \
+  app/gateway/tests/fakes.py \
+  app/gateway/tests/test_main.py \
+  app/gateway/tests/test_auth.py \
+  app/gateway/tests/test_ratelimit.py \
+  app/gateway/tests/test_config.py \
+  app/gateway/tests/test_telemetry.py; do
+  if [[ -f "$f" ]]; then ok "exists: $f"; else bad "missing: $f"; fi
+done
+
+# 97. gateway/main.py structurally implements the documented request pipeline: auth, tenant-id
+# mismatch, rate limit, quota, and the one proxied path -- grep-based, mirroring check 95's style
+GW_MAIN="app/gateway/src/gateway/main.py"
+if [[ -f "$GW_MAIN" ]]; then
+  missing=""
+  for marker in '"unauthorized"' '"tenant_mismatch"' '"rate_limited"' '"quota_exceeded"' 'PROXIED_PATH = "/v1/chat"'; do
+    grep -qF "$marker" "$GW_MAIN" || missing="$missing $marker"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$GW_MAIN implements auth / tenant-mismatch / rate-limit / quota rejection and the /v1/chat proxy path"
+  else
+    bad "$GW_MAIN is missing:$missing"
+  fi
+else
+  bad "missing $GW_MAIN"
+fi
+
+# 98. gateway/main.py uses per-client OTel httpx instrumentation (instrument_client/
+# uninstrument_client), not the global instrument()/uninstrument() form -- the real bug found in
+# this phase's own test suite (httpx.MockTransport never goes through the globally patched
+# transport classes). See docs/troubleshooting.md's Phase 12 section.
+if grep -q 'HTTPXClientInstrumentor().instrument_client(' "$GW_MAIN" 2>/dev/null \
+  && grep -q 'HTTPXClientInstrumentor().uninstrument_client(' "$GW_MAIN" 2>/dev/null; then
+  ok "$GW_MAIN instruments/uninstruments its httpx client per-instance (instrument_client), not globally"
+else
+  bad "$GW_MAIN must call HTTPXClientInstrumentor().instrument_client()/uninstrument_client() on app.state.http_client, not the global instrument()/uninstrument() form"
+fi
+
+# 99. helm/ai-platform: every gateway-*.yaml template exists, and _helpers.tpl defines the
+# gateway's own, deliberately distinct selector/name helpers (never built on ai-platform.name)
+for f in \
+  helm/ai-platform/templates/gateway-deployment.yaml \
+  helm/ai-platform/templates/gateway-service.yaml \
+  helm/ai-platform/templates/gateway-configmap.yaml \
+  helm/ai-platform/templates/gateway-secret.yaml \
+  helm/ai-platform/templates/gateway-networkpolicy.yaml \
+  helm/ai-platform/templates/gateway-servicemonitor.yaml; do
+  if [[ -f "$f" ]]; then ok "exists: $f"; else bad "missing: $f"; fi
+done
+if grep -q 'define "ai-platform.gatewayName"' helm/ai-platform/templates/_helpers.tpl 2>/dev/null \
+  && grep -q 'define "ai-platform.gatewaySelectorLabels"' helm/ai-platform/templates/_helpers.tpl 2>/dev/null; then
+  ok "_helpers.tpl defines ai-platform.gatewayName/gatewaySelectorLabels, distinct from ai-service's"
+else
+  bad "_helpers.tpl is missing ai-platform.gatewayName or ai-platform.gatewaySelectorLabels"
+fi
+
+# 100. values.yaml defaults the gateway off; only values-dev.yaml turns it on (staging/prod are
+# untouched by this phase, same "prove it in one environment first" pattern as Phase 9/11)
+if grep -qE '^\s*enabled:\s*false\s*$' <(awk '/^gateway:/,0' helm/ai-platform/values.yaml); then
+  ok "helm/ai-platform/values.yaml defaults gateway.enabled to false"
+else
+  bad "helm/ai-platform/values.yaml must default gateway.enabled to false"
+fi
+if grep -qE '^\s*enabled:\s*true\s*$' <(awk '/^gateway:/,0' helm/ai-platform/values-dev.yaml); then
+  ok "helm/ai-platform/values-dev.yaml turns gateway.enabled on"
+else
+  bad "helm/ai-platform/values-dev.yaml must set gateway.enabled: true"
+fi
+for env in staging prod; do
+  f="helm/ai-platform/values-$env.yaml"
+  if grep -q 'gateway' "$f" 2>/dev/null; then
+    bad "$f must not mention gateway yet -- only values-dev.yaml enables it in this delivery"
+  else
+    ok "$f correctly leaves the gateway untouched (inherits enabled: false from values.yaml)"
+  fi
+done
+
+# 101. ingress.yaml and networkpolicy.yaml both branch on .Values.gateway.enabled, so turning the
+# gateway on actually puts it in the request path instead of leaving ai-service directly exposed
+if grep -q 'gateway.enabled | ternary "ai-gateway" "ai-service"' helm/ai-platform/templates/ingress.yaml 2>/dev/null; then
+  ok "ingress.yaml routes to ai-gateway instead of ai-service when gateway.enabled"
+else
+  bad "ingress.yaml must route to ai-gateway (not ai-service) when .Values.gateway.enabled is true"
+fi
+if grep -q 'Values.gateway.enabled' helm/ai-platform/templates/networkpolicy.yaml 2>/dev/null \
+  && grep -q 'gatewaySelectorLabels' helm/ai-platform/templates/networkpolicy.yaml 2>/dev/null; then
+  ok "networkpolicy.yaml only allows ai-service ingress from ai-gateway's pods when gateway.enabled"
+else
+  bad "networkpolicy.yaml must source ai-service's allow-ingress rule from ai-gateway's pods when .Values.gateway.enabled is true"
+fi
+
+# 102. scripts/build/gateway-image.sh exists, is executable, and implements the same subcommand
+# set as scripts/build/image.sh
+GW_IMAGE_SCRIPT="scripts/build/gateway-image.sh"
+if [[ -f "$GW_IMAGE_SCRIPT" && -x "$GW_IMAGE_SCRIPT" ]]; then
+  ok "$GW_IMAGE_SCRIPT exists and is executable"
+  missing=""
+  for fn in cmd_info cmd_pin cmd_build cmd_run cmd_check cmd_push cmd_scan cmd_sbom cmd_publish; do
+    grep -q "^${fn}()" "$GW_IMAGE_SCRIPT" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$GW_IMAGE_SCRIPT implements the full info/pin/build/run/check/push/scan/sbom/publish set"
+  else
+    bad "$GW_IMAGE_SCRIPT is missing:$missing"
+  fi
+else
+  bad "$GW_IMAGE_SCRIPT is missing or not executable"
+fi
+
+# 103. Makefile: gateway-install/lint/test/check/run and gateway-image-* targets all exist
+for tgt in gateway-install gateway-lint gateway-test gateway-check gateway-run \
+  gateway-image-info gateway-image-build gateway-image-run gateway-image-check \
+  gateway-image-push gateway-image-scan gateway-image-sbom gateway-image-publish; do
+  if grep -qE "^${tgt}:" Makefile; then
+    ok "Makefile target: $tgt"
+  else
+    bad "Makefile is missing target: $tgt"
+  fi
+done
+
+# 104. deploy/platform/gateway/api-keys.dev.example.json is committed (a template with an
+# obviously fake key) and the real per-environment files are gitignored, never the example
+GW_KEYS_EXAMPLE="deploy/platform/gateway/api-keys.dev.example.json"
+if [[ -f "$GW_KEYS_EXAMPLE" ]]; then
+  if have python3 && python3 -c "import json,sys; json.load(open('$GW_KEYS_EXAMPLE'))" 2>/dev/null; then
+    ok "$GW_KEYS_EXAMPLE exists and is valid JSON"
+  else
+    bad "$GW_KEYS_EXAMPLE is missing or is not valid JSON"
+  fi
+else
+  bad "missing $GW_KEYS_EXAMPLE"
+fi
+if grep -q '/deploy/platform/gateway/api-keys\.\*\.local\.json' .gitignore 2>/dev/null; then
+  ok ".gitignore excludes the real per-environment gateway api-keys.*.local.json files"
+else
+  bad ".gitignore must exclude /deploy/platform/gateway/api-keys.*.local.json"
+fi
+
+# 105. README.md / ADR / troubleshooting / component-qa / docs/gateway.md all gained a Phase 12
+# section -- same pattern as checks 91-94 for Phase 11
+if grep -E '^\| 12 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 12 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 12 status row still says Planned (or the row is missing/reworded)"
+fi
+if grep -q 'ADR-30' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-30"
+else
+  bad "docs/adr/README.md is missing ADR-30 (API gateway decisions)"
+fi
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 12' "$f" 2>/dev/null; then
+    ok "$f has a Phase 12 section"
+  else
+    bad "$f is missing a Phase 12 section"
+  fi
+done
+if [[ -f docs/gateway.md ]]; then
+  ok "docs/gateway.md exists"
+else
+  bad "docs/gateway.md is missing"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

@@ -33,13 +33,33 @@ config:
   POLARIS_BACKEND: "openai_compat"
   POLARIS_OPENAI_BASE_URL: "http://ollama.model-serving.svc.cluster.local:11434/v1"
   POLARIS_OPENAI_MODEL: "llama3.2:1b-instruct-q4_K_M"
-  # A cold Ollama model load measured ~50s on the target machine (see
+  # A cold Ollama model load measured ~50s for real on the target machine (see
   # docs/troubleshooting.md, Phase 11) -- comfortably past the 30s default in
   # app/ai_service/src/ai_service/config.py's backend_timeout_s. 90s leaves real margin
-  # over that single, resource-constrained measurement without needing a cleaner baseline
-  # first. Dev-only: staging/prod stay on the mock backend (see above), so their values
-  # files keep the 30s default untouched.
+  # over that measurement. Dev-only: staging/prod stay on the mock backend (see above), so
+  # their values files keep the 30s default untouched.
   POLARIS_BACKEND_TIMEOUT_S: "90"
 
 serviceMonitor:
   enabled: true
+
+# Phase 12: dev is the one environment proven end to end with ai-gateway in front of
+# ai-service -- same "prove it in one environment first" pattern as the OTel/backend block
+# above. staging/prod are untouched (gateway.enabled stays false there), so Traefik keeps
+# reaching ai-service directly in both, exactly as before this phase.
+gateway:
+  enabled: true
+  config:
+    GATEWAY_ENVIRONMENT: "dev"
+    # Must stay >= POLARIS_BACKEND_TIMEOUT_S above (90) plus a margin, or the gateway would
+    # give up on a cold Ollama load that ai-service is still legitimately waiting on -- see
+    # gateway/config.py's own comment. 95 = 90 + a 5s margin, not gateway/config.py's generic
+    # default (which is already >= 90, but set explicitly here rather than relying on a
+    # default staying in sync with a number that lives in a different file).
+    GATEWAY_UPSTREAM_TIMEOUT_S: "95"
+    GATEWAY_OTEL_ENABLED: "true"
+  # Overridden at install time by scripts/deploy/helm.sh's cmd_apply from
+  # deploy/platform/gateway/api-keys.dev.local.json (gitignored; see
+  # deploy/platform/gateway/api-keys.dev.example.json for the format). Left at the chart's own
+  # "{}" default here deliberately -- a real tenant/key map does not belong in a committed
+  # values file even for a local-only demo (see ADR-30).

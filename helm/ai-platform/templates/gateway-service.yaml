@@ -1,0 +1,17 @@
+# helm/ai-platform/templates/gateway-service.yaml — Phase 12.
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-gateway
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "ai-platform.gatewaySelectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

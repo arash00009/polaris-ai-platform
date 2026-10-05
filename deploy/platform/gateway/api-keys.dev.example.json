@@ -1,0 +1,4 @@
+{
+  "_readme": "DELETE THIS '_readme' KEY before using the file -- gateway/config.py's own validator will reject it otherwise (it is not a valid API key: too short, and its value is not a valid tenant_id). Copy this file to api-keys.dev.local.json (gitignored) in the same folder, delete this key, then replace the example key below with a real, randomly generated one before running `make helm-apply-dev`. See helm/ai-platform/templates/gateway-secret.yaml and scripts/deploy/helm.sh's gateway_api_keys_json_for() for how this file is used. Shape: \"<api key>\": \"<tenant_id>\". tenant_id must match ai_service/schemas.py's TENANT_ID_PATTERN (lowercase letters/digits/-/_,  starting with a letter or digit, max 32 chars). Generate a real key with: python3 -c \"import secrets; print('sk-' + secrets.token_urlsafe(24))\"",
+  "sk-REPLACE-ME-WITH-A-REAL-RANDOM-KEY": "demo"
+}

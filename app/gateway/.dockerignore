@@ -1,0 +1,24 @@
+# Keep the build context small and free of local state. The Dockerfile only needs
+# requirements.txt, pyproject.toml and src/. Everything else is excluded on purpose.
+
+.venv
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Tests and dev dependencies never belong in the runtime image.
+tests
+requirements-dev.txt
+
+# Local configuration and anything that looks like a secret.
+.env
+.env.*
+*.pem
+*.key
+
+Dockerfile
+.dockerignore

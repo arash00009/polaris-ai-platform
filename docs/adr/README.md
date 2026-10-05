@@ -32,6 +32,7 @@ Short records of significant decisions: what was chosen, why, and when to revisi
 | ADR-26 | **GitOps with Argo CD**: a genuinely separate `polaris-gitops` repository (ADR-08 realized), multi-source Helm `Application`s that contribute only the image tag on top of `polaris-ai-platform`'s own chart and values, per-environment sync policy (`dev`/`staging` automated with self-heal, `prod` manual-sync-only) as the concrete promotion model, and a full namespace-recreate migration for the three existing Helm-managed releases | Realizes ADR-02/ADR-08's plan; "manual approval" for `prod` needed something this project could actually build without a real CD-approval system | Phase 18 (Argo Rollouts takes over `syncPolicy` with canary/blue-green analysis gated on Prometheus, once Phase 9/10 exist) |
 | ADR-27 | **Observability rollout scope and defaults**: `serviceMonitor.enabled`/`POLARIS_OTEL_ENABLED` default to `false` everywhere in `helm/ai-platform` except `values-dev.yaml`, to avoid a `ServiceMonitor` CRD-ordering failure; Prometheus's `serviceMonitorSelectorNilUsesHelmValues: false` and Loki's `auth_enabled: false` are deliberate single-cluster/single-tenant simplifications; `nodeExporter` stays off while `kubeStateMetrics` stays on (pod-restart data needs it); `LOKI_CHART_VERSION`/`TEMPO_CHART_VERSION` are deliberately left unpinned | A CRD applied by the same Helm release that also creates a resource of that CRD's kind can fail on first install, ordering-dependent; a shared/multi-tenant cluster would need each simplification revisited individually, not as a bundle | Phase 10 (OTel attribute curation may need `kubeStateMetrics`/`nodeExporter` revisited); the observability stack is installed in `staging`/`prod`; a real `helm list -n observability` pins the Loki/Tempo chart versions |
 | ADR-28 | **OpenTelemetry attribute curation**: `_FilteringSpanExporter` (wrapping the real OTLP span exporter, not a `SpanProcessor`) rebuilds every finished span with only `docs/architecture.md` section 6's allow-listed attributes; a `logging.Filter` reuses `logging_setup.LOG_FIELDS` — one allow-list, not two — to also curate what reaches the OTel-exported copy of a log line, not only stdout; `trace_id`/`span_id` are stamped onto stdout log lines too (`TraceContextFilter`), not only the OTel-exported copy, so `kubectl logs` alone finds the matching trace; `model_version`/`prompt_version` stay in the allow-list but are never set — no source of truth exists yet for either | A `SpanProcessor`'s `on_end`/`_on_ending` hooks both run after `Span.end()` has already frozen the span's attributes in the pinned SDK (opentelemetry-sdk==1.44) — confirmed by trying the more obvious processor-based approach first and watching it raise `TypeError` on every attempted deletion; an exporter-level wrapper, rebuilding a `ReadableSpan` with trimmed attributes, was confirmed to work with a standalone script before being adopted here | Phase 11 (`model_version` becomes real once `OpenAICompatBackend` is actually used); a prompt-template system gives `prompt_version` a source of truth; Phase 12 (the gateway makes cross-service trace propagation possible — this ADR deliberately does not attempt it, since there is only one service to propagate *across* so far) |
+| ADR-30 | **`ai-gateway`**: a new, separately deployable FastAPI service (not a shared library with `ai_service`) in the same Helm chart/release, gated by `gateway.enabled` (default `false`, only `values-dev.yaml` turns it on); auth derives tenant from the API key (`hmac.compare_digest`) and a mismatching body `tenant_id` is rejected with 403; per-tenant rate limit (token bucket) and daily quota are in-memory/per-pod, explicitly named LOCAL/DEMONSTRATION; its own dedicated `app.kubernetes.io/name: ai-gateway` Helm selector/label helpers, never built on `ai-service`'s; its first-ever real Kubernetes `Secret` (the API-key→tenant map) is applied directly via `helm upgrade --install`, bypassing GitOps, so a cleartext key is never committed to `polaris-gitops` | Closes Phase 10's own deferred cross-service trace-propagation gap and ADR-18's "Phase 12 derives the tenant" promise; a second Python package was simpler to reason about and deploy independently than threading auth/rate-limit/quota logic into `ai_service` itself, which has no business owning another tenant's credentials | Phase 14 (multi-tenancy may need the rate-limit/quota numbers to be per-tenant *configured*, not one flat default for every tenant); Phase 15 (Sealed Secrets takes over `GATEWAY_API_KEYS_JSON`); the per-pod rate limiter becomes a real problem once `gateway.replicaCount` > 1 (Redis-backed shared limiter, named not built) |
 
 ## Records
 
@@ -354,6 +355,104 @@ Alternatives: vLLM (GPU-oriented, its CPU backend is materially less mature/docu
 Consequences: `openai_compat.py` gains a stricter `check_ready()`; six tests in `test_openai_compat_backend.py` changed or were added; five new files under `deploy/platform/model-serving/`; a new `scripts/bootstrap/model-serving.sh` and four new `make model-serving-*` targets; `versions.env` gains `OLLAMA_IMAGE_TAG`/`OLLAMA_MODEL`; `values-dev.yaml` gains three real `config` keys switching `polaris-dev` to the real backend; a new `docs/model-serving.md`. Test count: 145 → 151; coverage: 98.74 % → 98.76 %. No new runtime dependency in `ai_service` itself — `check_ready()`'s change is pure standard-library JSON parsing, already imported transitively via `httpx`'s own `response.json()`. Confirmed on the target machine, this ADR's own decisions above grew by two more: `versions.env` gains `OLLAMA_IMAGE_REGISTRY`; `deploy/platform/model-serving/deployment.yaml` gains `OLLAMA_KEEP_ALIVE`; `values-dev.yaml` gains `POLARIS_BACKEND_TIMEOUT_S=90`.
 
 Revisit when: `polaris-staging`/`polaris-prod` are wired up to Ollama (would need either a second shared instance or per-environment capacity — not attempted this phase); Phase 12 potentially adds a second, gateway-facing consumer of this same Ollama instance; Phase 14 (multi-tenancy) revisits whether one shared instance across environments/tenants still holds up, or whether per-tenant quotas need per-tenant model-serving capacity; the measured ~50.5s cold-start number changes materially (a different model, different hardware) enough to revisit the 90s timeout margin.
+
+### ADR-30: `ai-gateway` — a separate FastAPI service, in-memory per-tenant rate limit/quota, and the project's first real Kubernetes Secret
+
+Status: accepted.
+
+Context: `docs/architecture.md` section 4.1 names a dedicated **Traffic** layer (`ai-gateway`),
+separate from the **Application** layer (`ai-service`), responsible for auth, per-tenant rate
+limit/quota, request IDs, routing and error shaping. ADR-18 already named the gap this closes:
+*"Phase 2 trusts `tenant_id` from the request body... from Phase 12/14 the gateway derives the
+tenant from the API key, and a mismatching body `tenant_id` is rejected with 403."* Phase 10's own
+`telemetry.py` module docstring deferred cross-service trace propagation here explicitly, since
+`ai_service` was still the only service in the project. `docs/architecture.md` section 18's exact
+"Done when" wording: *"Gateway with auth, per-tenant rate limit, request IDs, error handling
+(streaming if practical)."*
+
+Decision:
+
+- **A second, independently deployable Python package (`app/gateway`), never a shared library
+  with `app/ai_service`.** No Python import crosses between the two anywhere in this repo, by
+  design (`docs/architecture.md` Part D) — a handful of config fields (`log_level`, `log_format`,
+  `environment`, `otel_*`) are intentionally duplicated rather than shared, so a change to one
+  service's config can never silently alter the other's. This mirrors `scripts/deploy/helm.sh`'s
+  own stated reasoning for its own internal duplication.
+- **Tenant identity is derived from the API key (`hmac.compare_digest`, constant-time), never
+  trusted from the request body.** A body `tenant_id` that disagrees with the resolved tenant is
+  rejected with 403 `tenant_mismatch`; a body that is missing, malformed, or has no `tenant_id`
+  field at all is never rejected at the gateway — full body validation stays `ai-service`'s job,
+  unchanged since Phase 2. This directly closes ADR-18's named gap.
+- **Per-tenant rate limit (token bucket) and daily quota (fixed UTC calendar-day window) are
+  in-memory, per-pod — explicitly labelled LOCAL/DEMONSTRATION in `ratelimit.py`'s own module
+  docstring, not a hidden limitation.** `gateway.replicaCount` is deliberately `1` in this
+  delivery specifically so this limitation stays visible rather than silently multiplied across
+  replicas. The **production equivalent** is a Redis-backed shared limiter (e.g. a Lua-scripted
+  token bucket) — named, not built; nothing here claims otherwise.
+- **`ai-gateway` is a second Deployment/Service/ConfigMap/Secret/NetworkPolicy/ServiceMonitor in
+  the *same* Helm chart/release as `ai-service`**, gated by `gateway.enabled` (default `false`;
+  only `values-dev.yaml` sets it `true`) — the same "prove it in one environment first" pattern
+  ADR-27 (`POLARIS_OTEL_ENABLED`) and ADR-29 (`POLARIS_BACKEND=openai_compat`) already established,
+  rather than a second chart or a second release to manage.
+- **`ai-gateway` gets its own, dedicated `app.kubernetes.io/name: ai-gateway` selector/label Helm
+  helpers (`ai-platform.gatewayName`/`gatewaySelectorLabels`/`gatewayLabels`), never built on top
+  of `ai-platform.name`/`selectorLabels`.** `ai-service`'s own Deployment selector
+  (`app.kubernetes.io/name: ai-service`, from `values.yaml`'s `nameOverride`) is immutable on every
+  already-applied release since Phase 4/5; a gateway label set that is a superset of it would make
+  `helm upgrade` fail outright or make two Deployments fight over the same pods. The two name
+  values cannot actually collide today, but a dedicated helper keeps that guarantee explicit and
+  reviewable here rather than implicit in a `values.yaml` string nobody is required to keep
+  distinct.
+- **The API-key→tenant map (`GATEWAY_API_KEYS_JSON`) is this project's first real Kubernetes
+  `Secret`.** Applied via a direct `helm upgrade --install` for dev only, deliberately **bypassing
+  GitOps (Argo CD)** so a cleartext key is never committed to the separate `polaris-gitops`
+  repository — the same reasoning Phase 11 used for not GitOps-managing `model-serving`.
+  **Not** wired into Sealed Secrets: that is Phase 15's own scope, named here as a gap rather than
+  faked.
+- **Cross-service OTel trace propagation via `opentelemetry-instrumentation-httpx`'s
+  `instrument_client(client)`/`uninstrument_client(client)`, not the global `instrument()`/
+  `uninstrument()` form.** The global form patches `httpx._transports.default.{HTTPTransport,
+  AsyncHTTPTransport}` at the class level, which `httpx.MockTransport` (used by every fake upstream
+  in this phase's own test suite) never goes through — confirmed by reading the installed
+  library's source after the global form's own test failed outright. The per-client form is not
+  just a test-compatibility fix: it instruments only the one `httpx.AsyncClient` the gateway itself
+  constructs, directly addressing the "process-global instrumentation" concern
+  `ai_service/requirements.txt`'s own comment gives for why this instrumentor was left out of
+  `ai_service` entirely.
+- **`x-api-key` is stripped before forwarding to `ai-service`.** The gateway's own credential —
+  the thing that proves tenant identity — must never reach the upstream service, which has no
+  business seeing it.
+
+Alternatives: an API gateway product (Envoy Gateway, Kong) instead of a hand-written FastAPI
+service — `docs/architecture.md` section 18 explicitly scopes an Envoy Gateway evaluation as
+optional/"if practical" for this phase, not required for its "Done when" bar, and a hand-written
+gateway makes every one of the decisions above a reviewable, interview-explainable piece of code
+rather than a product's configuration surface. Importing `ai_service`'s existing `Settings`/
+schemas directly instead of duplicating a handful of fields — rejected, since it would make the
+two services' configs couple silently at the Python level, the exact risk the duplication avoids.
+Trusting the body `tenant_id` and only logging a mismatch — rejected: ADR-18 already named this as
+unsafe, and a logged-but-allowed mismatch is not actually enforcement.
+
+Consequences: a new `app/gateway` package (7 source modules, 7 test modules, 43 tests, 95.98 %
+coverage, `ruff check`/`ruff format --check` clean); six new Helm templates
+(`gateway-deployment/-service/-configmap/-secret/-networkpolicy/-servicemonitor.yaml`) plus
+`_helpers.tpl`/`ingress.yaml`/`networkpolicy.yaml` changes; a new `scripts/build/gateway-image.sh`
+and a full `gateway-*`/`gateway-image-*` `Makefile` target block; `scripts/deploy/helm.sh` gains
+gateway-awareness in `lint`/`template`/`apply`/`logs`/`smoke`; a new, gitignored-by-pattern
+`deploy/platform/gateway/api-keys.*.local.json` (with a committed `.example.json` template); a new
+`docs/gateway.md`. **Status: written and unit-tested in the sandbox only — not yet run against a
+real cluster.** No Docker daemon, `helm` binary or cluster exists in this sandbox (confirmed:
+`docker info` fails; `get.helm.sh` is blocked by the sandbox's egress proxy with HTTP 403), so the
+image build, the chart's rendered output, and the gateway's behaviour against a real `ai-service`
+are all reviewed, not yet executed — the next session's first job on the target machine.
+
+Revisit when: the target-machine run (section 5 of `docs/gateway.md`) either confirms this design
+or surfaces a real bug the sandbox's `httpx.MockTransport` fakes could not have caught; Phase 14
+(multi-tenancy) needs per-tenant-*configured* rate-limit/quota numbers instead of one flat default
+for every tenant; `gateway.replicaCount` is ever raised above `1` (the in-memory limiter stops
+being merely demonstrative and starts being actively wrong); Phase 15 (Sealed Secrets takes over
+`GATEWAY_API_KEYS_JSON`); streaming is added to `/v1/chat` (this gateway's proxy would need to
+support SSE, not attempted this phase).
 
 ## Template for a new record
 

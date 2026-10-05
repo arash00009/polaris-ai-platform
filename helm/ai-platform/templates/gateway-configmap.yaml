@@ -1,0 +1,16 @@
+# helm/ai-platform/templates/gateway-configmap.yaml — Phase 12. Non-secret GATEWAY_* settings
+# from values.yaml's gateway.config map -- same pattern as templates/configmap.yaml for
+# ai-service. GATEWAY_API_KEYS_JSON is deliberately NOT here -- see gateway-secret.yaml.
+{{- if .Values.gateway.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-gateway-config
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.gateway.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}

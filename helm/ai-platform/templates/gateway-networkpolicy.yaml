@@ -1,0 +1,35 @@
+# helm/ai-platform/templates/gateway-networkpolicy.yaml — Phase 12. Only an allow-ingress
+# rule for ai-gateway's own pods -- no separate default-deny object: templates/networkpolicy.yaml's
+# "ai-service-default-deny" already uses podSelector: {} (every pod in the namespace,
+# ai-gateway's included), so a second one here would be redundant, not additively stricter.
+# Once gateway.enabled is true, that same file's "ai-service-allow-ingress" rule is narrowed
+# (see that file's own comment) so Traefik reaches ai-service only through here, never directly.
+{{- if and .Values.gateway.enabled .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-gateway-allow-ingress
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-platform.gatewaySelectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowScrapeFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
+{{- end }}

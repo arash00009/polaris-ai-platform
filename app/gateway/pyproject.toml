@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polaris-ai-gateway"
+version = "0.1.0"
+description = "Polaris ai-gateway: auth, per-tenant rate limit/quota and routing in front of ai-service (Phase 12)"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.141",
+  "uvicorn>=0.53",
+  "pydantic>=2.13,<3",
+  "pydantic-settings>=2.15,<3",
+  "httpx>=0.28,<1",
+  "prometheus-fastapi-instrumentator>=8.1",
+  "opentelemetry-api>=1.44,<2",
+  "opentelemetry-sdk>=1.44,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.44,<2",
+  "opentelemetry-instrumentation-fastapi>=0.65b0",
+  # Phase 12 is the first phase where ai-gateway's outbound call to ai_service is a real
+  # cross-service hop worth tracing as one trace_id across two spans (docs/architecture.md
+  # section 7). app/ai_service/requirements.txt left this instrumentor out in Phase 9 because
+  # that service's only outbound call (to Ollama, Phase 11) has no further hop to propagate to
+  # -- see that file's comment. It is deliberately included here, where it is actually used.
+  "opentelemetry-instrumentation-httpx>=0.65b0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+  "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
+]
+
+[tool.coverage.run]
+source = ["gateway"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]

@@ -122,3 +122,56 @@ ingress:
 
 podSecurityStandard:
   version: "v1.34"
+
+# Phase 12: ai-gateway, a sibling Deployment/Service in front of ai-service (templates/
+# gateway-*.yaml). Off at this shared-defaults level for the same "prove it in one environment
+# first" reason POLARIS_OTEL_ENABLED (Phase 9) and POLARIS_BACKEND=openai_compat (Phase 11)
+# are off here too -- only values-dev.yaml turns it on. staging/prod stay exactly as they were
+# before this phase: Traefik -> ai-service directly, zero risk, zero new prerequisite.
+gateway:
+  enabled: false
+
+  image:
+    repository: "registry.localhost:5000/polaris/ai-gateway"
+    # No default, same reasoning and same required-guard as the top-level image.tag above --
+    # scripts/deploy/helm.sh always passes --set gateway.image.tag=<version>-<git-sha>.
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+  # 1, not 2 like ai-service's top-level replicaCount -- ratelimit.py's own module docstring
+  # names exactly why: its token bucket and daily quota are in-memory, per-pod state, so more
+  # than one replica would silently multiply every tenant's effective limit. Revisit together
+  # with ADR-30's "Revisit when" column (a shared Redis-backed limiter) before raising this.
+
+  # Non-secret GATEWAY_* settings (GATEWAY_API_KEYS_JSON is a Secret -- see
+  # templates/gateway-secret.yaml and values-dev.yaml's apiKeysJson, not this map).
+  config:
+    GATEWAY_UPSTREAM_BASE_URL: "http://ai-service:80"
+    GATEWAY_LOG_LEVEL: "INFO"
+    GATEWAY_READY_TIMEOUT_S: "2"
+    GATEWAY_RATE_LIMIT_PER_MINUTE: "60"
+    GATEWAY_RATE_LIMIT_BURST: "20"
+    GATEWAY_QUOTA_PER_DAY: "2000"
+    GATEWAY_OTEL_ENABLED: "false"
+    GATEWAY_OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
+    # GATEWAY_ENVIRONMENT and GATEWAY_UPSTREAM_TIMEOUT_S are set per values-<env>.yaml, not
+    # here -- the timeout in particular must track whatever that environment's own
+    # POLARIS_BACKEND_TIMEOUT_S is (see gateway/config.py's comment on why its default is 95,
+    # not ai_service's generic 30).
+
+  # A placeholder only: real tenants never belong in a committed values file. Overridden by
+  # `--set-file gateway.apiKeysJson=<local, gitignored file>` -- see templates/gateway-secret.yaml
+  # and deploy/platform/gateway/api-keys.dev.example.json.
+  apiKeysJson: "{}"
+
+  # Smaller than ai-service's defaults: this process does no model inference and holds only a
+  # small in-memory key/rate-limit/quota table. Starting point only, not measured under load --
+  # same honesty as the top-level `resources` comment above.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: "0.5"
+      memory: 128Mi

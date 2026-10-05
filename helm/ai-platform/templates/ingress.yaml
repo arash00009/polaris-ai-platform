@@ -1,6 +1,12 @@
 # helm/ai-platform/templates/ingress.yaml — Phase 5. Same as deploy/k8s/ai-service/ingress.yaml,
 # except the host comes from values-<env>.yaml so all three releases can share one Traefik and
 # one k3d ingress port, routed by Host header (ai.localhost / ai-staging.localhost / ai-prod.localhost).
+#
+# Phase 12: when .Values.gateway.enabled, the backend Service is ai-gateway instead of
+# ai-service -- every chat request must pass through its auth/rate-limit/quota checks first.
+# The Ingress object's own name stays "ai-service" either way (changing it would mean Traefik
+# briefly has two IngressRoutes for the same host during a `helm upgrade`, which is a bigger
+# risk than a name that no longer matches its backend 1:1 -- see ADR-30).
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -19,7 +25,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: ai-service
+                name: {{ .Values.gateway.enabled | ternary "ai-gateway" "ai-service" }}
                 port:
                   number: 80
 {{- end }}

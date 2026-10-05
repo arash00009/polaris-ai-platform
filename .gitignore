@@ -8,6 +8,11 @@ kubeconfig
 *.kubeconfig
 .kube/
 
+# Phase 12: the real api_key->tenant_id map for ai-gateway, per environment. The .example.json
+# files ARE committed (they are templates with an obviously fake key) -- see
+# deploy/platform/gateway/api-keys.dev.example.json and helm/ai-platform/templates/gateway-secret.yaml.
+/deploy/platform/gateway/api-keys.*.local.json
+
 # Python
 __pycache__/
 *.py[cod]
@@ -27,6 +32,12 @@ htmlcov/
 Thumbs.db
 
 # Build and scan output
+# NOTE: these are anchored to the repo root (leading slash). An earlier,
+# unanchored "build/" silently matched **/build/ at any depth, which meant
+# scripts/build/ (and image.sh inside it) was gitignored since Phase 3 and
+# had never actually been committed — only caught by the first real GitHub
+# Actions run in Phase 6, on a fresh checkout that has no local-disk copy
+# to fall back on. See docs/troubleshooting.md (Phase 6).
 /dist/
 /build/
 *.sbom.json
@@ -38,6 +49,9 @@ trivy-results.*
 *.tfstate.*
 
 # Scanner reports, SBOMs, saved image tarballs and the vulnerability database cache (make image-scan)
+# Anchored for the same reason as /build/ and /dist/ above — no nested
+# "artifacts" source directory exists today, but an unanchored pattern
+# would silently swallow one if it ever did.
 /artifacts/
 
 # Throwaway virtualenv for CI-only Python tools (pip-audit, yamllint), Phase 6. Not app/ai_service's

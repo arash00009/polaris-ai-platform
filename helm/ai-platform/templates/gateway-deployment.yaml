@@ -1,0 +1,90 @@
+# helm/ai-platform/templates/gateway-deployment.yaml — Phase 12.
+#
+# A sibling Deployment to templates/deployment.yaml (ai-service), guarded by
+# .Values.gateway.enabled so values-staging.yaml/values-prod.yaml (gateway.enabled: false) are
+# completely unaffected -- only values-dev.yaml turns this on, the same "prove it in one
+# environment first" pattern Phase 9's OTel flags and Phase 11's POLARIS_BACKEND=openai_compat
+# already used. See _helpers.tpl's comment for why this Deployment's selector is a wholly
+# separate app.kubernetes.io/name value, not a variant of ai-service's.
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-gateway
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ai-platform.gatewaySelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Same checksum/config trick as deployment.yaml (ADR-25) -- a config-only change must
+        # roll the Deployment, not just update the ConfigMap/Secret's data in place.
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/gateway-secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "ai-platform.gatewayLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10002
+        runAsGroup: 10002
+        fsGroup: 10002
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ai-gateway
+          image: "{{ required "gateway.image.repository is required" .Values.gateway.image.repository }}:{{ required "gateway.image.tag is required — scripts/deploy/helm.sh passes --set gateway.image.tag=<version>-<git-sha>" .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: ai-gateway-config
+            - secretRef:
+                name: ai-gateway-api-keys
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep {{ .Values.lifecycle.preStopSleepSeconds }}"]
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+{{- end }}

@@ -29,6 +29,22 @@ spec:
       {{- include "ai-platform.selectorLabels" . | nindent 6 }}
   policyTypes: ["Ingress"]
   ingress:
+    # Phase 12: once the gateway is in front of ai-service (gateway.enabled), Traefik must no
+    # longer reach ai-service directly -- every chat request is meant to go through
+    # ai-gateway's auth/rate-limit/quota checks (docs/architecture.md section 4.1's layer
+    # table). This rule is Traefik-sourced (allowFromNamespace) only when the gateway is OFF
+    # (values-staging.yaml/values-prod.yaml today -- unchanged, zero risk); when it is ON, the
+    # equivalent rule instead allows ai-gateway's own pods (same namespace, pod-level selector),
+    # which is what templates/ingress.yaml now routes through -- see ADR-30.
+    {{- if .Values.gateway.enabled }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-platform.gatewaySelectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
+    {{- else }}
     - from:
         - namespaceSelector:
             matchLabels:
@@ -36,6 +52,7 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.allowPort }}
+    {{- end }}
     # Phase 9: Prometheus (in the observability namespace) scraping GET /metrics. A separate
     # `from` entry, not appended to the one above, because every namespaceSelector in the same
     # rule is OR'd with every port -- keeping them apart means allowFromNamespace's ingress is

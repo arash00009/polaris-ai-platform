@@ -5,6 +5,11 @@ APP_DIR := app/ai_service
 VENV    := $(APP_DIR)/.venv
 PY      := $(VENV)/bin/python
 
+# Phase 12.
+GATEWAY_DIR  := app/gateway
+GATEWAY_VENV := $(GATEWAY_DIR)/.venv
+GATEWAY_PY   := $(GATEWAY_VENV)/bin/python
+
 # Phase 8: polaris-gitops is a separate repository (ADR-08); default to a sibling checkout next
 # to this one (~/polaris/polaris-gitops next to ~/polaris/polaris-ai-platform).
 GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
@@ -12,6 +17,9 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 .PHONY: help tools-install doctor lint test cluster-up cluster-down cluster-reset cluster-status smoke versions \
 	app-install app-lint app-test app-check app-run \
 	image-info image-pin image-build image-run image-check image-push image-scan image-sbom image-publish \
+	gateway-install gateway-lint gateway-test gateway-check gateway-run \
+	gateway-image-info gateway-image-build gateway-image-run gateway-image-check gateway-image-push \
+	gateway-image-scan gateway-image-sbom gateway-image-publish \
 	deploy-info deploy-apply deploy-status deploy-logs deploy-smoke deploy-delete \
 	helm-lint helm-template-dev helm-template-staging helm-template-prod \
 	helm-apply-dev helm-apply-staging helm-apply-prod \
@@ -106,6 +114,52 @@ image-sbom: ## Write a CycloneDX software bill of materials for the image to art
 image-publish: ## Retag the already-built image and push it to GHCR (needs: docker login ghcr.io first)
 	./scripts/build/image.sh publish
 
+# --- Phase 12: ai-gateway (app/gateway) — same targets as the AI service above, one app each ---
+
+$(GATEWAY_PY):
+	@echo "No Python virtualenv yet. Run: make gateway-install" >&2; exit 1
+
+gateway-install: ## Create the gateway virtualenv and install the pinned dependencies
+	python3 -m venv $(GATEWAY_VENV)
+	$(GATEWAY_PY) -m pip install -r $(GATEWAY_DIR)/requirements-dev.txt
+	$(GATEWAY_PY) -m pip install --no-deps -e $(GATEWAY_DIR)
+
+gateway-lint: $(GATEWAY_PY) ## Lint and format-check the gateway (ruff)
+	$(GATEWAY_PY) -m ruff check $(GATEWAY_DIR)
+	$(GATEWAY_PY) -m ruff format --check $(GATEWAY_DIR)
+
+gateway-test: $(GATEWAY_PY) ## Run the gateway's unit tests with coverage (fails below 95 %)
+	cd $(GATEWAY_DIR) && .venv/bin/python -m pytest --cov --cov-fail-under=95
+
+gateway-check: gateway-lint gateway-test ## Lint and test the gateway
+
+gateway-run: $(GATEWAY_PY) ## Run the gateway locally on http://127.0.0.1:8080 (GATEWAY_* variables pass through; needs ai-service reachable at GATEWAY_UPSTREAM_BASE_URL)
+	cd $(GATEWAY_DIR) && .venv/bin/python -m uvicorn gateway.main:create_app --factory --host 127.0.0.1 --port 8080 --no-access-log
+
+gateway-image-info: ## Show the gateway image tags that would be used
+	./scripts/build/gateway-image.sh info
+
+gateway-image-build: ## Build the ai-gateway container image (tags: <version>-<git sha> and <version>)
+	./scripts/build/gateway-image.sh build
+
+gateway-image-run: ## Run the gateway image locally, hardened, on http://127.0.0.1:8080 (GATEWAY_* variables pass through)
+	./scripts/build/gateway-image.sh run
+
+gateway-image-check: ## Start the gateway image and verify user, probes, auth contract and JSON logs
+	./scripts/build/gateway-image.sh check
+
+gateway-image-push: ## Push the gateway image to the local registry (localhost:5000)
+	./scripts/build/gateway-image.sh push
+
+gateway-image-scan: ## Scan the gateway image for vulnerabilities with Trivy (fails on fixable HIGH/CRITICAL)
+	./scripts/build/gateway-image.sh scan
+
+gateway-image-sbom: ## Write a CycloneDX SBOM for the gateway image to artifacts/
+	./scripts/build/gateway-image.sh sbom
+
+gateway-image-publish: ## Retag the already-built gateway image and push it to GHCR (needs: docker login ghcr.io first)
+	./scripts/build/gateway-image.sh publish
+
 deploy-info: ## Show the image tag, namespace and context 'make deploy-apply' would use
 	./scripts/deploy/app.sh info
 
@@ -157,7 +211,7 @@ helm-status-staging: ## Show the staging release's status and resources
 helm-status-prod: ## Show the prod release's status and resources
 	./scripts/deploy/helm.sh status prod
 
-helm-logs-dev: ## Tail the dev release's pods' JSON logs (add ARGS=--follow to keep streaming)
+helm-logs-dev: ## Tail the dev release's ai-service pods' JSON logs (ARGS=--follow to stream; add ARGS=gateway, or ARGS="--follow gateway", for the gateway's own pods)
 	./scripts/deploy/helm.sh logs dev $(ARGS)
 
 helm-logs-staging: ## Tail the staging release's pods' JSON logs (add ARGS=--follow)

@@ -30,3 +30,32 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 environment: {{ required "values-<env>.yaml must set 'environment'" .Values.environment }}
 {{- end -}}
+
+{{/*
+Phase 12: ai-gateway's own name/selector/labels, deliberately NOT built on top of
+ai-platform.name/selectorLabels/labels above. ai-service's Deployment selector is
+app.kubernetes.io/name: ai-service (values.yaml's nameOverride, not the chart name) and is
+immutable on an already-applied release (every polaris-dev/staging/prod namespace since
+Phase 4/5) -- changing it, or giving the gateway's pods a label set that is a superset of it
+(which Kubernetes treats as ALSO matching that selector), would make `helm upgrade` fail
+outright or make two Deployments fight over the same pods. The two name values ("ai-service"
+vs "ai-gateway" below) already can't collide, but giving ai-gateway its own dedicated helper
+rather than a second nameOverride-style value keeps that guarantee explicit and reviewable
+here, instead of implicit in a values.yaml string nobody is required to keep distinct -- see
+ADR-30.
+*/}}
+{{- define "ai-platform.gatewayName" -}}
+ai-gateway
+{{- end -}}
+
+{{- define "ai-platform.gatewaySelectorLabels" -}}
+app.kubernetes.io/name: {{ include "ai-platform.gatewayName" . }}
+{{- end -}}
+
+{{- define "ai-platform.gatewayLabels" -}}
+{{ include "ai-platform.gatewaySelectorLabels" . }}
+app.kubernetes.io/part-of: polaris
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+environment: {{ required "values-<env>.yaml must set 'environment'" .Values.environment }}
+{{- end -}}
