@@ -502,6 +502,130 @@ theorized, by the `ignoreDifferences` limitation above); streaming is added to `
 gateway's proxy would need to support SSE, not attempted this phase); the daily quota path is
 ever driven to real exhaustion against a live cluster (deliberately not done this phase).
 
+### ADR-31: Tenant-attribution counters in `ai_service`/`ai-gateway`, OpenCost for shared-resource cost, a local illustrative rate card
+
+Status: accepted; **built and tested in the sandbox; the OpenCost install, the dashboard, and
+two named gaps below are still the target-machine verification step (no cluster in this
+sandbox).**
+
+Context: `docs/architecture.md` section 11 ("FinOps flow") and section 18's roadmap line for this
+phase ("Tenant → requests → resources → *estimated* cost dashboard; OpenCost evaluated") specify
+two cost paths that must both reach a per-tenant number: model-serving cost attributed by each
+tenant's share of inference-seconds, and gateway/service cost attributed by each tenant's share
+of requests — both multiplied by a **local, configurable rate card**, with every resulting panel
+or exported number labelled "ESTIMATE — local, not billing data." Nothing in this project
+computed a per-tenant request, token or inference-time count before this phase: Phase 9's own
+`prometheus-fastapi-instrumentator` metrics are real but generic (route template and grouped
+status only, never `tenant_id`) — confirmed by grepping the installed codebase for a counter
+with any of those names before writing one, not assumed missing.
+
+Decision:
+
+- **Three new `Counter`s in `ai_service/telemetry.py` (`FinOpsMetrics`: `ai_requests_total`,
+  `ai_tokens_total`, `ai_inference_seconds_total`) and one in `gateway/telemetry.py`
+  (`ai_gateway_requests_total`) — the exact names `docs/architecture.md` section 11's own
+  Mermaid diagram already specified before any of this code existed, not invented here.**
+  Confirmed directly against `prometheus_client`'s real behaviour (a throwaway script in the
+  sandbox): creating a `Counter` named `ai_requests` is what exposes it as `ai_requests_total` on
+  `/metrics` — the trailing `_total` is the library's own convention, not something to spell out
+  in the constructor, matching how `http_requests_total` already appears on the same endpoint.
+  `tenant_id`/`model` are both already allow-listed as bounded metric labels (`docs/
+  architecture.md` section 9, "a handful"); the small, fixed `outcome`/`kind` enums added here
+  (3 and 2 values respectively for `ai_service`, 7 for the gateway) stay inside that same bound.
+- **Registered on the SAME per-app `CollectorRegistry` the Instrumentator already uses in both
+  services, never a second or the process-global default one.** This is the exact Phase 9
+  regression this project already learned the hard way (a shared global registry silently
+  serves only the first app instance created in a process — every test in this suite builds a
+  new one); both new `test_finops_metrics.py` files assert the new counters and the generic
+  `http_requests_total` metric appear together in the SAME `/metrics` response as a direct
+  regression guard, not just that `.labels().inc()` was called correctly.
+- **Counted on every outcome, failure included — never only on success.** `ai_service` labels a
+  `backend_timeout`/`backend_error` request with `model="unknown"` (no `GenerateResult` ever
+  existed to label with correctly) rather than guessing the configured model name, which would
+  misattribute a failed call to a model that may not even be the one that failed. The gateway
+  labels its own `unauthorized` outcome with `tenant_id="unknown"` for the same reason (no tenant
+  was ever resolved) and, for `tenant_mismatch`, deliberately counts under the *API-key-resolved*
+  tenant, never the attacker-claimed body `tenant_id` — counting the claimed value would let
+  anyone pollute another tenant's cost series just by naming it in a request body.
+- **The gateway's own counter is a genuinely separate signal from `ai_service`'s, not a
+  duplicate.** `ai_service` never sees a request the gateway itself rejected (401/403/429), so
+  `ai_gateway_requests_total` is the only place a per-tenant *request-share* number for the
+  gateway/service's own pod cost can come from; `ai_service`'s three counters are the only place
+  per-tenant *token* and *inference-second* detail exist at all, since the gateway has no way to
+  know either. The dashboard (below) deliberately reads from both rather than picking one.
+- **OpenCost (CNCF, free), not Kubecost**, confirmed against `docs/architecture.md` section 5's
+  comparison table (Kubecost's free tier needs account registration and is limited) — installed
+  via its own Helm chart into a new, dedicated `finops` namespace (`deploy/platform/finops/`),
+  reading cAdvisor/kube-state-metrics data from the Phase 9 Prometheus already running (`opencost.
+  prometheus.internal.*`), never a second monitoring stack. `OPENCOST_CHART_VERSION` is left
+  deliberately **empty** in `versions.env`, the same "resolve for real, then pin" two-step
+  already used for `LOKI_CHART_VERSION`/`TEMPO_CHART_VERSION` (Phase 9) — OpenCost's chart repo
+  (`opencost.github.io/opencost-helm-chart`) is a `*.github.io` repo-index page, the same
+  category of page this sandbox cannot reach that made Loki/Tempo's versions unpinnable here too.
+- **A local, illustrative rate card (`opencost-values.yaml`'s `opencost.customPricing.costModel`:
+  $0.03/vCPU-hr, $0.004/GB-hr, $0.0001/GB-hr storage), `customPricing.provider: custom` —
+  confirmed as the documented, correct mechanism for an on-prem cluster with no cloud billing
+  API to call instead** (OpenCost's own on-prem configuration docs, fetched and read for real,
+  not recalled from training data). These numbers are explicitly NOT real electricity or cloud
+  prices; every dashboard panel built from them carries "(ESTIMATE)" in its own title, and the
+  dashboard's own `description` field and a dedicated top text panel both repeat the same
+  warning, satisfying section 11's "every panel/exported number" labelling requirement two ways.
+- **Tenant attribution lives entirely in Grafana PromQL (`finops-dashboard.json`), not in new
+  application code or a recording rule.** Model-serving cost: `(tenant's rate(ai_inference_
+  seconds_total) / total rate(ai_inference_seconds_total)) * (OpenCost's own container_cpu_
+  allocation/container_memory_allocation_bytes for the model-serving namespace * the rate
+  card's node_cpu_hourly_cost/node_ram_hourly_cost)`. Gateway/service cost: the identical shape,
+  substituting `ai_gateway_requests_total{outcome="proxied"}` for the share and the
+  `polaris-dev` namespace for the OpenCost side. `outcome="proxied"` deliberately includes every
+  status code `ai_service` returned, 2xx or not — a request that reached and was answered by
+  `ai_service` genuinely cost the gateway/service pods compute time regardless of the answer.
+- **A notional per-1000-token showback price is documented as a formula (`docs/finops.md`), not
+  built as a dashboard panel.** `docs/architecture.md` section 11 calls this "optional"; stacking
+  a third division on top of two already-unverified cost numbers (see the two gaps below) was
+  judged more likely to produce a confident-looking but meaningless figure than a useful one
+  before either cost base is confirmed for real. Named here as a deliberate scope decision, not
+  a silent gap.
+- **Two things are named as open, unconfirmed gaps rather than guessed at**, exactly the
+  discipline this project already applies to `OLLAMA_IMAGE_REGISTRY` (Phase 11) and the
+  gateway's `ignoreDifferences` limitation (ADR-30): (1) `opencost-values.yaml`'s
+  `prometheus.internal.serviceName: kube-prometheus-stack-prometheus` is inferred from the
+  standard Helm `fullnameOverride` convention applied to `kube-prometheus-stack-values.yaml`'s
+  own `fullnameOverride: kube-prometheus-stack`, never confirmed against a real `kubectl -n
+  observability get svc` (no cluster in this sandbox); (2) whether Prometheus itself scrapes
+  OpenCost's own cost-allocation metrics back out needs a real `helm show values opencost-
+  charts/opencost` check on the target machine — OpenCost's own docs point at a *separate* chart
+  (`prometheus-community/prometheus-opencost-exporter`) for that, not a flag on this one, and
+  guessing a values key risked either silently doing nothing or an outright `helm install`
+  schema-validation failure.
+
+Alternatives: Kubecost — rejected, same reasoning as `docs/architecture.md` section 5 already
+gives (free-tier registration/limits). A new, separate `finops`-only Prometheus just for
+OpenCost's own exported metrics — rejected: the whole point of Phase 9's `serviceMonitorSelector:
+{}` simplification (ADR-27) is that any namespace's ServiceMonitor is already discovered
+cluster-wide, so a second Prometheus would only duplicate kube-state-metrics/cAdvisor scraping
+for no benefit. A `Histogram` instead of `Counter` for `ai_inference_seconds_total` — rejected:
+the FinOps dashboard only ever needs a rate or a ratio over a window, which a running total
+already supports, and `http_request_duration_seconds` (already a Histogram, from Phase 9) is
+already this project's answer to "what does an individual request's latency distribution look
+like" — a second one for the same underlying number would be redundant, not complementary.
+
+Consequences: `ai_service`'s test suite grew from 151 to 159 tests (99.21 % coverage, `ruff
+check`/`ruff format --check` clean); `ai-gateway`'s grew from 43 to 51 (96.07 % coverage, same
+lint/format clean) — both still above the project's 95 % coverage gate, both `make app-check`/
+`make gateway-check` confirmed. A new `deploy/platform/finops/` (namespace, OpenCost values, a
+seven-panel dashboard JSON + generated ConfigMap), `scripts/bootstrap/finops.sh` (install/status/
+ui/dashboard-configmap/uninstall, mirroring `observability.sh`'s shape), a `finops-*` `Makefile`
+target block, and a new `docs/finops.md`. **Status: not yet run against a real cluster** —
+`make finops-install`, the dashboard actually rendering real cost numbers, and the two named
+gaps above are this phase's target-machine step, same as every previous phase's own handoff.
+
+Revisit when: the target-machine run confirms or corrects the Prometheus Service name and the
+ServiceMonitor gap above (both get pinned/fixed here, not left open indefinitely); Phase 14
+(multi-tenancy) needs these same counters sliced by more than a flat `tenant_id` (e.g. a tenant
+tier or plan); the rate card needs to reflect a real cloud quote instead of an illustrative one;
+a notional showback price is actually built once the cost base it would divide by is confirmed
+for real.
+
 ## Template for a new record
 
 ```

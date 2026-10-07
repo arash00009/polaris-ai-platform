@@ -220,6 +220,12 @@ def create_app(
             logger.warning(
                 "chat rejected", extra={"request_id": request_id, "code": "unauthorized"}
             )
+            # Phase 13: "unknown" tenant_id here, not the raw (unauthenticated) caller input --
+            # see telemetry.py's module docstring for why that one fixed value is still
+            # cardinality-safe.
+            request.app.state.gateway_requests_total.labels(
+                tenant_id="unknown", outcome="unauthorized"
+            ).inc()
             return _error_response(request, 401, "unauthorized", "Missing or unknown API key.")
         span.set_attribute("tenant_id", tenant_id)
         span.set_attribute("request_id", request_id)
@@ -230,6 +236,9 @@ def create_app(
                 "chat rejected",
                 extra={"request_id": request_id, "tenant_id": tenant_id, "code": "tenant_mismatch"},
             )
+            request.app.state.gateway_requests_total.labels(
+                tenant_id=tenant_id, outcome="tenant_mismatch"
+            ).inc()
             return _error_response(
                 request,
                 403,
@@ -243,6 +252,9 @@ def create_app(
                 "chat rejected",
                 extra={"request_id": request_id, "tenant_id": tenant_id, "code": "rate_limited"},
             )
+            request.app.state.gateway_requests_total.labels(
+                tenant_id=tenant_id, outcome="rate_limited"
+            ).inc()
             return _error_response(
                 request,
                 429,
@@ -257,6 +269,9 @@ def create_app(
                 "chat rejected",
                 extra={"request_id": request_id, "tenant_id": tenant_id, "code": "quota_exceeded"},
             )
+            request.app.state.gateway_requests_total.labels(
+                tenant_id=tenant_id, outcome="quota_exceeded"
+            ).inc()
             return _error_response(
                 request, 429, "quota_exceeded", "This tenant's daily request quota is used up."
             )
@@ -283,6 +298,9 @@ def create_app(
                     "code": "upstream_timeout",
                 },
             )
+            request.app.state.gateway_requests_total.labels(
+                tenant_id=tenant_id, outcome="upstream_timeout"
+            ).inc()
             return _error_response(
                 request, 504, "upstream_timeout", "ai-service did not answer in time."
             )
@@ -295,6 +313,9 @@ def create_app(
                     "code": "upstream_unreachable",
                 },
             )
+            request.app.state.gateway_requests_total.labels(
+                tenant_id=tenant_id, outcome="upstream_unreachable"
+            ).inc()
             return _error_response(
                 request, 502, "upstream_unreachable", "ai-service is unreachable."
             )
@@ -310,6 +331,13 @@ def create_app(
             },
         )
         span.set_attribute("latency_ms", latency_ms)
+        # Phase 13: "proxied" regardless of ai_service's own status code -- ai_service's own
+        # ai_requests_total is what distinguishes success from backend_timeout/backend_error;
+        # this counter only needs to know the gateway genuinely forwarded the call, for the
+        # request-share half of the cost model (see telemetry.py's module docstring).
+        request.app.state.gateway_requests_total.labels(
+            tenant_id=tenant_id, outcome="proxied"
+        ).inc()
         response_headers = {
             key: value
             for key, value in upstream_response.headers.items()

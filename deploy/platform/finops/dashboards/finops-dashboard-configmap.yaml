@@ -1,0 +1,130 @@
+# deploy/platform/finops/dashboards/finops-dashboard-configmap.yaml — Phase 13.
+#
+# The grafana_dashboard=1 label is what kube-prometheus-stack-values.yaml's
+# grafana.sidecar.dashboards config watches for (searchNamespace: ALL -- same as Phase 9's
+# ai-service-dashboard-configmap.yaml, this does not need to live in 'observability' or 'finops'
+# specifically). finops-dashboard.json is embedded verbatim as this ConfigMap's data -- edit
+# that file, not this one, and re-run 'scripts/bootstrap/finops.sh dashboard-configmap' (or
+# 'make finops-dashboard-configmap') to regenerate it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-dashboard
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: polaris
+    grafana_dashboard: "1"
+data:
+  finops-dashboard.json: |
+    {
+      "title": "Polaris FinOps",
+      "uid": "polaris-finops",
+      "description": "Phase 13 (FinOps). ALL cost figures on this dashboard are ESTIMATES from a local, illustrative rate card (deploy/platform/finops/opencost-values.yaml's opencost.customPricing.costModel) -- NOT real cloud billing or electricity prices. Tenant attribution follows docs/architecture.md section 11: model-serving cost is split by each tenant's share of ai_inference_seconds_total (ai_service/telemetry.py, Phase 13); gateway/service cost is split by each tenant's share of ai_gateway_requests_total{outcome=\"proxied\"} (gateway/telemetry.py, Phase 13). See docs/finops.md for the full methodology and its named limitations.",
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "30s",
+      "tags": ["polaris", "finops", "phase-13"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Read this before trusting a number on this dashboard",
+          "type": "text",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "**ESTIMATE -- local rate card, not billing data.** Every $ figure below comes from `opencost-values.yaml`'s illustrative CPU/RAM/hr prices, not a cloud bill or a power meter. Model-serving cost is attributed to tenants by *inference-seconds share*; gateway/service cost by *request share*. See `docs/finops.md`."
+          }
+        },
+        {
+          "id": 2,
+          "title": "Requests by tenant and outcome (ai-service, ESTIMATE-free)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+          "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(rate(ai_requests_total{namespace=\"polaris-dev\"}[5m])) by (tenant_id, outcome)",
+              "legendFormat": "{{tenant_id}} ({{outcome}})"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Tokens by tenant (prompt vs completion, ai-service)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(rate(ai_tokens_total{namespace=\"polaris-dev\"}[5m])) by (tenant_id, kind)",
+              "legendFormat": "{{tenant_id}} ({{kind}})"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Inference time by tenant (model backend wait, ai-service)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+          "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(rate(ai_inference_seconds_total{namespace=\"polaris-dev\"}[5m])) by (tenant_id)",
+              "legendFormat": "{{tenant_id}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Namespace estimated hourly cost (OpenCost + local rate card, ESTIMATE)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "sum(container_cpu_allocation{namespace=\"model-serving\"}) * avg(node_cpu_hourly_cost) + (sum(container_memory_allocation_bytes{namespace=\"model-serving\"}) / 1024 / 1024 / 1024) * avg(node_ram_hourly_cost)",
+              "legendFormat": "model-serving"
+            },
+            {
+              "expr": "sum(container_cpu_allocation{namespace=\"polaris-dev\"}) * avg(node_cpu_hourly_cost) + (sum(container_memory_allocation_bytes{namespace=\"polaris-dev\"}) / 1024 / 1024 / 1024) * avg(node_ram_hourly_cost)",
+              "legendFormat": "polaris-dev (gateway + service)"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "title": "Model-serving cost by tenant, inference-seconds share (ESTIMATE)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "(sum(rate(ai_inference_seconds_total{namespace=\"polaris-dev\"}[1h])) by (tenant_id) / scalar(sum(rate(ai_inference_seconds_total{namespace=\"polaris-dev\"}[1h])))) * scalar(sum(container_cpu_allocation{namespace=\"model-serving\"}) * avg(node_cpu_hourly_cost) + (sum(container_memory_allocation_bytes{namespace=\"model-serving\"}) / 1024 / 1024 / 1024) * avg(node_ram_hourly_cost))",
+              "legendFormat": "{{tenant_id}}"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "title": "Gateway/service cost by tenant, request share (ESTIMATE)",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+          "targets": [
+            {
+              "expr": "(sum(rate(ai_gateway_requests_total{namespace=\"polaris-dev\",outcome=\"proxied\"}[1h])) by (tenant_id) / scalar(sum(rate(ai_gateway_requests_total{namespace=\"polaris-dev\",outcome=\"proxied\"}[1h])))) * scalar(sum(container_cpu_allocation{namespace=\"polaris-dev\"}) * avg(node_cpu_hourly_cost) + (sum(container_memory_allocation_bytes{namespace=\"polaris-dev\"}) / 1024 / 1024 / 1024) * avg(node_ram_hourly_cost))",
+              "legendFormat": "{{tenant_id}}"
+            }
+          ]
+        }
+      ]
+    }

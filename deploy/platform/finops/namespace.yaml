@@ -1,0 +1,19 @@
+# deploy/platform/finops/namespace.yaml — Phase 13.
+#
+# pod-security.kubernetes.io/enforce: baseline, not restricted -- same reasoning, and the same
+# "not yet checked for real" gap, as deploy/platform/observability/namespace.yaml (Phase 9) and
+# deploy/platform/model-serving/namespace.yaml (Phase 11): nothing here has verified for real
+# that the opencost/opencost chart's own upstream image and generated PodSecurityContext
+# actually run under "restricted" (it is a third-party chart this project does not control the
+# image or template for). Tightening this once verified is a named follow-up, not silently
+# skipped -- see docs/finops.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: finops
+  labels:
+    app.kubernetes.io/part-of: polaris
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

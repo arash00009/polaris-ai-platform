@@ -204,6 +204,13 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                     "code": "backend_timeout",
                 },
             )
+            # Phase 13: counted even on failure -- a tenant whose requests keep timing out is
+            # still a tenant worth seeing on the cost/usage dashboard, not a silent gap in it.
+            # "unknown" for model: the backend raised before any GenerateResult existed, so there
+            # is nothing real to label with (see telemetry.py's module docstring).
+            request.app.state.finops_metrics.requests_total.labels(
+                tenant_id=body.tenant_id, model="unknown", outcome="backend_timeout"
+            ).inc()
             raise ApiError(
                 504, "backend_timeout", "The model backend did not answer in time."
             ) from exc
@@ -217,6 +224,9 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                     "reason": str(exc),
                 },
             )
+            request.app.state.finops_metrics.requests_total.labels(
+                tenant_id=body.tenant_id, model="unknown", outcome="backend_error"
+            ).inc()
             raise ApiError(502, "backend_error", "The model backend failed.") from exc
 
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -236,6 +246,25 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             _set_span_attributes(prompt_tokens=result.prompt_tokens)
         if result.completion_tokens is not None:
             _set_span_attributes(completion_tokens=result.completion_tokens)
+
+        # Phase 13 (FinOps): the three cost-attribution counters, success path. See
+        # telemetry.py's module docstring for exactly why these three, with these labels.
+        finops = request.app.state.finops_metrics
+        finops.requests_total.labels(
+            tenant_id=body.tenant_id, model=result.model, outcome="success"
+        ).inc()
+        if result.prompt_tokens is not None:
+            finops.tokens_total.labels(
+                tenant_id=body.tenant_id, model=result.model, kind="prompt"
+            ).inc(result.prompt_tokens)
+        if result.completion_tokens is not None:
+            finops.tokens_total.labels(
+                tenant_id=body.tenant_id, model=result.model, kind="completion"
+            ).inc(result.completion_tokens)
+        finops.inference_seconds_total.labels(tenant_id=body.tenant_id, model=result.model).inc(
+            latency_ms / 1000.0
+        )
+
         return ChatResponse(
             response=result.text,
             model=result.model,

@@ -17,6 +17,23 @@ hitting POST /v1/chat through the gateway therefore produces two linked spans (g
 ai_service) under one trace_id, instead of Phase 10's single-service trace -- confirmed in the
 sandbox with test_main.py's test_trace_propagation; real confirmation against Tempo is this
 phase's target-machine step.
+
+Phase 13 (FinOps) adds one more series here: ``ai_gateway_requests_total{tenant_id, outcome}``.
+docs/architecture.md section 11's cost model attributes the gateway's own pod cost to tenants by
+*request share*: tenant A's cost-of-running-the-gateway is tenant A's fraction of all requests
+the gateway handled in the window, times the gateway pod's own CPU/memory-derived cost estimate.
+That needs a per-tenant request count at the one place that sees every request regardless of
+outcome -- this module, not ai_service's (which never sees a request the gateway itself
+rejected; ai_service.telemetry's own ``ai_requests_total`` covers everything that did reach it,
+with the token/inference-second detail this proxy has no way to know).
+
+``outcome`` is one of the gateway's own seven known codes -- "unauthorized", "tenant_mismatch",
+"rate_limited", "quota_exceeded", "upstream_timeout", "upstream_unreachable", "proxied" (meaning
+it genuinely forwarded the request and got some response back, 2xx or not -- ai_service owns
+reporting its own outcome in its own counter) -- never a raw status code or exception string, so
+this stays exactly as cardinality-bounded as every other enum label in this project. ``tenant_id``
+is "unknown" for the one outcome where no tenant was ever resolved (unauthorized) -- the
+handful-of-tenants bound (section 9) still holds with one extra fixed value added to it.
 """
 
 import logging
@@ -32,7 +49,7 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Counter
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from gateway import __version__
@@ -43,6 +60,10 @@ SERVICE_NAME = "ai-gateway"
 
 _TRACER_PROVIDER_ATTR = "otel_tracer_provider"
 _LOGGER_PROVIDER_ATTR = "otel_logger_provider"
+
+# Phase 13: where setup_telemetry stashes the Counter for main.py's chat() handler to record
+# into. Unconditional, like /metrics itself -- see this module's docstring.
+_GATEWAY_REQUESTS_ATTR = "gateway_requests_total"
 
 # Same allow-list as ai_service/telemetry.py (docs/architecture.md section 6) -- this process
 # never sets model/model_version/prompt_version/prompt_tokens/completion_tokens itself (that
@@ -121,8 +142,22 @@ _RESERVED_LOG_RECORD_ATTRS: Final[frozenset[str]] = frozenset(
 
 
 def setup_telemetry(app: FastAPI, settings: Settings) -> None:
-    Instrumentator(registry=CollectorRegistry()).instrument(app).expose(
+    # Phase 13: one shared CollectorRegistry for the instrumentator's generic HTTP metrics and
+    # the gateway_requests_total counter below -- same per-app-instance reasoning as
+    # ai_service/telemetry.py's own setup_telemetry (see that module's docstring).
+    registry = CollectorRegistry()
+    Instrumentator(registry=registry).instrument(app).expose(
         app, endpoint="/metrics", include_in_schema=False
+    )
+    setattr(
+        app.state,
+        _GATEWAY_REQUESTS_ATTR,
+        Counter(
+            "ai_gateway_requests",
+            "Requests handled by ai-gateway, by tenant and outcome.",
+            ["tenant_id", "outcome"],
+            registry=registry,
+        ),
     )
 
     if not settings.otel_enabled:

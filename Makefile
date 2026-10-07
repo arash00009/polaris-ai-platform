@@ -334,3 +334,23 @@ model-serving-pull: ## Pull the configured model (versions.env: OLLAMA_MODEL) in
 
 model-serving-uninstall: ## Remove the model server (deletes the pulled model along with its PVC)
 	./scripts/bootstrap/model-serving.sh uninstall
+
+# --- Phase 13: FinOps (OpenCost) ----------------------------------------------------------------
+# Its own 'finops' namespace, same pattern as obs-*/model-serving-* above. Install this AFTER
+# make obs-install (OpenCost reads the Phase 9 Prometheus; it does not bring its own) -- see
+# docs/finops.md.
+
+finops-install: ## Install OpenCost into the finops namespace (needs: make cluster-up, make obs-install)
+	./scripts/bootstrap/finops.sh install
+
+finops-status: ## Show OpenCost's Helm release and pods
+	./scripts/bootstrap/finops.sh status
+
+finops-ui: ## Port-forward the OpenCost UI to http://localhost:9090 (Ctrl-C to stop)
+	./scripts/bootstrap/finops.sh ui
+
+finops-dashboard-configmap: ## Regenerate dashboards/finops-dashboard-configmap.yaml from dashboards/finops-dashboard.json
+	./scripts/bootstrap/finops.sh dashboard-configmap
+
+finops-uninstall: ## Remove OpenCost (the Prometheus counters it read from are untouched)
+	./scripts/bootstrap/finops.sh uninstall

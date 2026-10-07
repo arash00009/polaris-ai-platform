@@ -109,11 +109,61 @@ The OTel handler is a *second* handler on top of the existing stdout handler fro
 logging_setup.configure_logging(), which Python's logging module supports natively -- every log
 call fires both. Phase 10 does add one thing to that stdout path (TraceContextFilter, see
 logging_setup.py) but does not touch configure_logging()'s formatting or handler structure.
+
+Phase 13 (FinOps) adds three more series to the same /metrics endpoint, alongside
+prometheus-fastapi-instrumentator's generic HTTP ones: ``ai_requests_total``,
+``ai_tokens_total``, ``ai_inference_seconds_total`` -- the exact names docs/architecture.md
+section 11's FinOps-flow diagram already specified before any of this code existed, not names
+picked here. These are business counters the generic instrumentator cannot produce (it only
+sees "a request to a route happened", never tenant_id, token counts, or model-attributed
+inference time), and they exist for exactly one reason: docs/architecture.md section 11's cost
+model attributes model-server cost to tenants by *inference-seconds share*, which needs a
+per-tenant, per-model running total of seconds actually spent waiting on the backend -- a number
+nothing else in this codebase was already computing anywhere.
+
+Labels, and why each is safe under the cardinality rule (section 9: ``tenant_id`` and ``model``
+are both already allow-listed as "bounded -- a handful"):
+
+- ``ai_requests_total{tenant_id, model, outcome}`` -- one increment per call to POST /v1/chat
+  that reached this handler (the gateway's own rejections in Phase 12 -- 401/403/429 -- never
+  reach this service at all, so they are not double-counted here; gateway.telemetry's own
+  ``ai_gateway_requests_total`` is what tracks those). ``outcome`` is one of exactly three
+  values -- "success", "backend_timeout", "backend_error" -- never the raw exception message or
+  anything unbounded. ``model`` is "unknown" for the two failure outcomes: the backend raised
+  before returning a ``GenerateResult``, so there is no ``result.model`` to label with yet, and
+  guessing the configured model name would attribute a failed call to a model that may not even
+  be the one that failed (MockBackend's failure-injection tests exist precisely to produce
+  failures with no real backend involved at all).
+- ``ai_tokens_total{tenant_id, model, kind}`` -- incremented only on success, once for
+  ``result.prompt_tokens`` (``kind="prompt"``) and once for ``result.completion_tokens``
+  (``kind="completion"``), each only when that count is not None -- same "not every backend
+  reports token counts" gap this module's sibling code (the span attributes just above in
+  main.py) already lives with; a backend that returns None is simply not represented in this
+  counter for that call, not faked as zero.
+- ``ai_inference_seconds_total{tenant_id, model}`` -- incremented only on success, by the same
+  wall-clock seconds already computed as ``latency_ms`` (converted back from milliseconds to
+  seconds here, matching Prometheus's own convention that every ``_seconds`` series is in base
+  SI units). This is deliberately the handler's measured latency, not a backend-reported
+  "inference time" field -- no backend in this codebase reports one, and the architecture
+  doc's own cost model only ever asks for "inference-seconds", not a finer breakdown.
+
+All three are plain ``Counter``s (never a ``Histogram`` or ``Gauge``): the FinOps dashboard
+only ever needs a rate or a ratio over a window (``increase(...)`` divided by the tenant's share
+of the total), which a running total already supports -- a distribution of individual request
+durations is Prometheus's existing generic ``http_request_duration_seconds`` histogram's job,
+not this one's.
+
+Registered on the SAME per-app ``CollectorRegistry`` the Instrumentator below already uses, not
+the process-global default one -- see the comment at the top of ``setup_telemetry`` explaining
+why a shared global registry silently only serves the first app instance created in a process,
+which every test in this suite would otherwise hit. The three Counter objects are stashed on
+``app.state`` (next to the OTel providers) so ``main.py``'s request handler can reach them
+without this module importing anything from main.py.
 """
 
 import logging
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, NamedTuple
 
 from fastapi import FastAPI
 from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -124,7 +174,7 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-from prometheus_client import CollectorRegistry
+from prometheus_client import CollectorRegistry, Counter
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from ai_service import __version__
@@ -147,6 +197,22 @@ SERVICE_NAME = "ai-service"
 # OTel is disabled" an explicit, testable case rather than an AttributeError waiting to happen.
 _TRACER_PROVIDER_ATTR = "otel_tracer_provider"
 _LOGGER_PROVIDER_ATTR = "otel_logger_provider"
+
+# Phase 13: where the FinOps Counters created in setup_telemetry are stashed for main.py's chat()
+# handler to record into. Always present (these are plain prometheus_client Counters, unconditional
+# like /metrics itself, unlike the two OTel providers above which only exist when otel_enabled).
+_FINOPS_METRICS_ATTR = "finops_metrics"
+
+
+class FinOpsMetrics(NamedTuple):
+    """The three Phase 13 cost-attribution counters. See this module's docstring for exactly
+    what each one means and why its labels are cardinality-safe.
+    """
+
+    requests_total: Counter
+    tokens_total: Counter
+    inference_seconds_total: Counter
+
 
 # Phase 10: docs/architecture.md section 6's trace/log attribute allow-list, the names as they
 # appear on an exported span after _FilteringSpanExporter below has run. Two allow-listed names
@@ -270,8 +336,38 @@ def setup_telemetry(app: FastAPI, settings: Settings) -> None:
     # records observations -- later apps' /metrics stayed populated with only their own /metrics
     # scrape, missing every other route. In production create_app() runs once per process, so
     # this never showed up there; it is still the more correct default regardless.
-    Instrumentator(registry=CollectorRegistry()).instrument(app).expose(
+    registry = CollectorRegistry()
+    Instrumentator(registry=registry).instrument(app).expose(
         app, endpoint="/metrics", include_in_schema=False
+    )
+    # Phase 13: the three FinOps counters, registered on that SAME registry (same reasoning as
+    # just above -- one per app instance, never the process-global default) and stashed on
+    # app.state so main.py's chat() handler can record into them. Unconditional, like the
+    # instrumentator above: cost attribution should not silently stop working just because
+    # POLARIS_OTEL_ENABLED=false (tracing/logging is the opt-in signal; metrics never has been).
+    setattr(
+        app.state,
+        _FINOPS_METRICS_ATTR,
+        FinOpsMetrics(
+            requests_total=Counter(
+                "ai_requests",
+                "Chat requests handled by ai_service, by tenant, model and outcome.",
+                ["tenant_id", "model", "outcome"],
+                registry=registry,
+            ),
+            tokens_total=Counter(
+                "ai_tokens",
+                "Prompt/completion tokens observed by ai_service, by tenant, model and kind.",
+                ["tenant_id", "model", "kind"],
+                registry=registry,
+            ),
+            inference_seconds_total=Counter(
+                "ai_inference_seconds",
+                "Wall-clock seconds spent waiting on the model backend, by tenant and model.",
+                ["tenant_id", "model"],
+                registry=registry,
+            ),
+        ),
     )
 
     if not settings.otel_enabled:

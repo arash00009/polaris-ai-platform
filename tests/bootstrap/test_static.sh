@@ -1219,5 +1219,127 @@ else
   bad "docs/gateway.md is missing"
 fi
 
+# --- Phase 13: FinOps (OpenCost, tenant-attribution counters) ----------------------------------
+
+# 106. versions.env: OPENCOST_HELM_REPO is a real https:// URL; OPENCOST_CHART_VERSION is
+# deliberately empty (same unpinned-*.github.io-chart pattern as LOKI_CHART_VERSION/
+# TEMPO_CHART_VERSION, check 65)
+if [[ "${OPENCOST_HELM_REPO:-}" == https://* ]]; then
+  ok "OPENCOST_HELM_REPO=$OPENCOST_HELM_REPO"
+else
+  bad "OPENCOST_HELM_REPO must be set to a https:// repo URL"
+fi
+if [[ -z "${OPENCOST_CHART_VERSION:-}" ]]; then
+  ok "OPENCOST_CHART_VERSION is still deliberately unpinned"
+else
+  ok "OPENCOST_CHART_VERSION has been pinned from real install output (versions.env)"
+fi
+
+# 107. Every deploy/platform/finops/**/*.yaml file parses as valid YAML (same "no helm/cluster in
+# this sandbox" reasoning as checks 66/82's observability/model-serving equivalents)
+if have python3; then
+  if python3 -c "
+import sys, glob, yaml
+files = sorted(glob.glob('deploy/platform/finops/**/*.yaml', recursive=True))
+ok = True
+for f in files:
+    try:
+        list(yaml.safe_load_all(open(f)))
+    except Exception as e:
+        print(f'{f}: {e}', file=sys.stderr)
+        ok = False
+sys.exit(0 if ok and files else 1)
+"; then
+    ok "every deploy/platform/finops/**/*.yaml file parses as valid YAML"
+  else
+    bad "a deploy/platform/finops/**/*.yaml file failed to parse (see stderr above)"
+  fi
+else
+  bad "python3 not found -- cannot check deploy/platform/finops/**/*.yaml"
+fi
+
+# 108. namespace.yaml enforces Pod Security "baseline", not "restricted" -- deliberate (see its
+# own comment), same pattern as check 83's model-serving equivalent
+FINOPS_NS="deploy/platform/finops/namespace.yaml"
+if grep -q 'pod-security.kubernetes.io/enforce: baseline' "$FINOPS_NS" 2>/dev/null; then
+  ok "$FINOPS_NS enforces Pod Security 'baseline'"
+else
+  bad "$FINOPS_NS is missing or does not enforce Pod Security 'baseline'"
+fi
+
+# 109. scripts/bootstrap/finops.sh exists, is executable, and implements the full subcommand set
+FINOPS_SCRIPT="scripts/bootstrap/finops.sh"
+if [[ -f "$FINOPS_SCRIPT" && -x "$FINOPS_SCRIPT" ]]; then
+  ok "$FINOPS_SCRIPT exists and is executable"
+  missing=""
+  for fn in cmd_install cmd_status cmd_ui cmd_dashboard_configmap cmd_uninstall; do
+    grep -q "^${fn}()" "$FINOPS_SCRIPT" || missing="$missing $fn"
+  done
+  if [[ -z "$missing" ]]; then
+    ok "$FINOPS_SCRIPT implements the full install/status/ui/dashboard-configmap/uninstall set"
+  else
+    bad "$FINOPS_SCRIPT is missing:$missing"
+  fi
+else
+  bad "$FINOPS_SCRIPT is missing or not executable"
+fi
+
+# 110. Makefile: finops-install/-status/-ui/-dashboard-configmap/-uninstall targets exist
+for tgt in finops-install finops-status finops-ui finops-dashboard-configmap finops-uninstall; do
+  if grep -qE "^${tgt}:" Makefile; then
+    ok "Makefile target: $tgt"
+  else
+    bad "Makefile is missing target: $tgt"
+  fi
+done
+
+# 111. ai_service/telemetry.py and gateway/telemetry.py actually define the Phase 13
+# cost-attribution counters (not just documented, wired in) -- same "wired in" reasoning as
+# check 80's Phase 10 equivalent
+if grep -q 'class FinOpsMetrics' app/ai_service/src/ai_service/telemetry.py \
+  && grep -q '"ai_requests"' app/ai_service/src/ai_service/telemetry.py \
+  && grep -q '"ai_tokens"' app/ai_service/src/ai_service/telemetry.py \
+  && grep -q '"ai_inference_seconds"' app/ai_service/src/ai_service/telemetry.py; then
+  ok "ai_service/telemetry.py defines the Phase 13 FinOps counters"
+else
+  bad "ai_service/telemetry.py is missing FinOpsMetrics or one of its three Counters"
+fi
+if grep -q '"ai_gateway_requests"' app/gateway/src/gateway/telemetry.py; then
+  ok "gateway/telemetry.py defines the Phase 13 ai_gateway_requests_total counter"
+else
+  bad "gateway/telemetry.py is missing the ai_gateway_requests_total counter"
+fi
+if grep -q 'finops_metrics' app/ai_service/src/ai_service/main.py \
+  && grep -q 'gateway_requests_total' app/gateway/src/gateway/main.py; then
+  ok "main.py in both services actually records into the Phase 13 counters, not just telemetry.py defining them"
+else
+  bad "one of the two main.py handlers never records into its Phase 13 counter(s)"
+fi
+
+# 112. README.md / ADR / troubleshooting / component-qa / docs/finops.md all gained a Phase 13
+# section -- same pattern as checks 91-94/105 for Phases 11/12
+if grep -E '^\| 13 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 13 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 13 status row still says Planned (or the row is missing/reworded)"
+fi
+if grep -q 'ADR-31' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-31"
+else
+  bad "docs/adr/README.md is missing ADR-31 (FinOps decisions)"
+fi
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 13' "$f" 2>/dev/null; then
+    ok "$f has a Phase 13 section"
+  else
+    bad "$f is missing a Phase 13 section"
+  fi
+done
+if [[ -f docs/finops.md ]]; then
+  ok "docs/finops.md exists"
+else
+  bad "docs/finops.md is missing"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]
