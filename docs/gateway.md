@@ -7,16 +7,16 @@ body), enforces a per-tenant rate limit and daily quota, and propagates request 
 phase: *"Gateway with auth, per-tenant rate limit, request IDs, error handling (streaming if
 practical)."*
 
-**Verified state: written and unit-tested in the sandbox only — not yet run against a real
-cluster.** `app/gateway` is a brand-new package (43 tests, 95.98 % coverage, `ruff check`/`ruff
-format --check` both clean) exercised entirely against `httpx.MockTransport` fakes; no Docker
-daemon, `helm` binary or cluster exists in this sandbox (confirmed: `docker info` fails, `helm` is
-not installed, and `get.helm.sh` is blocked by this sandbox's egress proxy with HTTP 403), so the
-container image, the Helm templates' rendered output, and the gateway's behaviour against a real
-`ai-service` are all reviewed but not yet built/rendered/run for real. That is this phase's
-target-machine step — see section 7 below for the exact commands. One genuine bug *was* found and
-fixed by actually running this phase's own test suite (section 6), consistent with every earlier
-phase's "verify, don't assume" discipline.
+**Verified state: confirmed on the target machine, 2026-10-05/07.** `app/gateway` (43 tests,
+95.98 % coverage, `ruff check`/`ruff format --check` both clean) was built, pushed, deployed
+through GitOps, and exercised against the real cluster: authentication (401), tenant-mismatch
+rejection (403, ADR-18's design), per-tenant rate limiting (429 with `Retry-After`, burst=20
+confirmed exactly), a genuinely successful proxied chat (200, real latency, real body), and one
+real distributed trace in Tempo spanning both services with correct parent/child span linkage all
+matched the design. Three real bugs were found and fixed along the way — one in the sandbox before
+the target-machine run (section 6), two only found once this phase actually ran against a real
+cluster (section 7.1) — plus one genuine, still-open GitOps limitation that is now named rather
+than silently worked around forever (section 7.2). See section 7 for the full, honest accounting.
 
 ## 1. Architecture
 
@@ -168,7 +168,7 @@ key returns 401 when the gateway is enabled. The `Makefile` gained a full `gatew
 `values.yaml`'s shared defaults keep `gateway.enabled: false`; `values-staging.yaml`/
 `values-prod.yaml` are untouched by this phase.
 
-## 5. Installing and verifying (target machine — not yet run)
+## 5. Installing and verifying (target machine — confirmed)
 
 ```bash
 make gateway-install && make gateway-check          # local venv: lint + 43 tests + coverage gate
@@ -180,16 +180,25 @@ cp deploy/platform/gateway/api-keys.dev.example.json deploy/platform/gateway/api
 
 make helm-lint-dev && make helm-template-dev         # chart renders with gateway.enabled=true
 make gateway-image-push                              # push to the local k3d registry
-make helm-apply-dev                                  # direct helm upgrade --install, bypassing GitOps
-                                                      # for this one Secret (section 2.4) — same as
-                                                      # Phase 11's model-serving namespace, not GitOps-owned
+make gitops-bump-dev ARGS=--push                     # NOT make helm-apply-dev -- polaris-dev has been
+                                                      # GitOps-managed (server-side apply) since Phase 8,
+                                                      # so a direct helm upgrade --install now conflicts
+                                                      # with argocd-controller's field ownership (the same
+                                                      # class of conflict Phase 11's troubleshooting section
+                                                      # already named); only the gateway's one real Secret
+                                                      # (section 2.4) is still applied directly, separately
 make helm-smoke-dev                                  # now includes a no-API-key → 401 check
 ```
 
-Every command above is written and reviewed, not yet executed against a real cluster — this
-section is the exact, ordered handoff for the next session on the target machine.
+Every command above ran for real on the target machine. One correction to this section's own
+original plan, found while actually running it: `make helm-apply-dev` was the documented path when
+this section was first written, but `polaris-dev` has been GitOps-managed since Phase 8 — the real
+run used `scripts/gitops/bump-image-tag.sh --push` (via `make gitops-bump-dev`) instead, exactly
+the same lesson Phase 11's own troubleshooting section already recorded for a config-only change.
+See `docs/troubleshooting.md`'s Phase 12 section for the two real bugs this surfaced in
+`bump-image-tag.sh` and `scripts/deploy/helm.sh` themselves, both fixed and re-confirmed.
 
-## 6. One real bug, found by actually running the test suite
+## 6. One real bug, found in the sandbox by actually running the test suite
 
 `test_otel_enabled_propagates_traceparent_to_upstream` failed the first time this phase's own
 tests were run, after using the global `HTTPXClientInstrumentor().instrument()` form: the
@@ -208,19 +217,95 @@ requirements.txt`'s own comment gives for why that instrumentor was left out of 
 entirely. All 43 tests pass with this fix, including a double-instrumentation guard test (two
 otel-enabled app instances in one process).
 
-## 7. Known limitations, honestly
+## 7. Target-machine verification (real)
 
-- **Not yet run against a real cluster.** Everything in section 5 is written and reviewed, not
-  executed — no Docker daemon, `helm` binary or cluster exists in this sandbox. This is the single
-  largest gap in this phase's delivery and the next session's first job.
+### 7.1 Two more real bugs, found only by running this phase against a real cluster
+
+Neither of these could have been caught by `httpx.MockTransport` fakes — both needed a real Helm
+install and a real Argo CD render to surface:
+
+- **`helm upgrade --install --set-string gateway.apiKeysJson=<raw JSON>` silently corrupted the
+  value.** Helm's `--set`/`--set-string` strvals mini-language parses its argument as its own small
+  grammar; unescaped `{`, `}`, `"`, `:` in a JSON blob are structural to that grammar, not passed
+  through literally. The live Secret decoded to `["sk-...": "demo"]`, not `{"sk-...": "demo"}`, and
+  the gateway 500'd every request with a pydantic `ValidationError`. Fixed by switching
+  `scripts/deploy/helm.sh`'s `gateway_api_keys_json_for()` to return a file *path* and the call
+  site to `--set-file` instead of `--set-string` — `--set-file` passes raw bytes through untouched.
+- **Argo CD's own render of `ai-platform-dev` failed: `gateway.image.tag is required`.**
+  `scripts/gitops/bump-image-tag.sh` had never been taught about the gateway — it only ever wrote
+  `ai-service`'s own tag into `environments/<env>/image.yaml`. Fixed by extending the script with
+  gateway-aware `gateway_version()`/`gateway_enabled_for()`/`need_pushed_gateway()`, which append a
+  `gateway: {image: {...}}` block when the target environment turns the gateway on.
+
+Full root-cause detail, the exact fix commits, and the confirm commands for both are in
+`docs/troubleshooting.md`'s Phase 12 section.
+
+### 7.2 A genuine, still-open GitOps limitation — named, not hidden
+
+`apps/dev-app.yaml`'s Argo CD `Application` carries an `ignoreDifferences` entry for the
+`ai-gateway-api-keys` Secret (`jsonPointers: [/data, /stringData]`), intended to let the chart's
+`"{}"` placeholder and the real, directly-applied Secret content coexist without `selfHeal`
+fighting the real value. **Tested twice on the real cluster, independently, and confirmed not to
+work**: the entry is genuinely present on the live `Application` object's `spec`, `status`, *and*
+its `last-applied-configuration` annotation both times — this is not a typo or a sync that never
+picked up the change — and `selfHeal` still reverts the Secret's `stringData` back to `"{}"` on the
+next reconciliation regardless.
+
+This is now accepted as a real, confirmed limitation of `ignoreDifferences` against this specific
+resource/field combination in this Argo CD version, not a configuration mistake to keep chasing.
+The workaround used for testing — pausing `ai-platform-dev`'s `syncPolicy.automated` for the
+duration, re-applying the real Secret, then **always restoring automated sync afterward** — is
+exactly that: a workaround, not a fix, and it must never be left in place permanently (it silently
+disables GitOps self-heal for the whole environment, not just this one Secret). The honest, durable
+fix is the one already named in section 2.4 and ADR-30: a real secret manager (Sealed Secrets,
+External Secrets Operator, or Vault) in `polaris-gitops` itself, which is Phase 15's scope.
+
+### 7.3 Full functional verification results
+
+| Check | Result |
+|-------|--------|
+| No API key → 401 | `401 unauthorized`, correct error envelope |
+| Valid key, body `tenant_id` mismatches the key's tenant → 403 | `403 tenant_mismatch` — ADR-18's design confirmed working on the real cluster |
+| Valid key, incomplete body (missing `tenant_id`) → passed through, `ai-service`'s own 422 | Confirmed the gateway does not duplicate body validation, as designed |
+| 30 concurrent requests, one tenant, `rate_limit_burst: 20` | 20 × `200`, 10 × `429 rate_limited`, each with `Retry-After: 1` present on the wire |
+| Valid key, valid tenant, warm backend → real chat | `200`, real `response`/`model`/`request_id`/`latency_ms` body, matching `ChatResponse` exactly |
+| Cross-service trace propagation | One real trace in Tempo (`GET /api/traces/<traceId>`) with `ai-service`'s root span's `parentSpanId` equal to `ai-gateway`'s own span id — real W3C trace-context propagation, not just matching ids in logs |
+| Daily quota (`quota_per_day: 2000`) | **Not driven to real exhaustion.** Deliberately not fired 2,000 times at an already resource-constrained host for a check that shares the identical `_error_response(429, ...)` code path the rate-limit test above already proved end-to-end, just gated by a different counter/threshold. Confirmed by code review and the sandbox's own unit tests only — a deliberate scope decision, named here rather than silently skipped |
+| Streaming (SSE) | Not attempted — scoped "if practical" in the roadmap, and `ai-service`'s own `/v1/chat` is not a streaming endpoint yet (unchanged from section 6 of the architecture doc) |
+
+A cosmetic, non-functional observation along the way: a proxied `200` response carries two `Date`
+headers on the wire — one added by uvicorn for the gateway's own response, one copied through from
+`ai-service`'s forwarded headers (`Date` is not in `main.py`'s `_DO_NOT_FORWARD` set, unlike
+`content-length`/`connection`/etc.). Harmless — no client parses a duplicate header as an error —
+but worth a one-line note rather than leaving it unremarked.
+
+### 7.4 An environmental finding, confirmed not to be a code bug
+
+Two `504`s were seen during testing — once `ai-service`'s own `backend_timeout`, once the
+gateway's own `upstream_timeout`. Both were root-caused, not just retried past: a direct call
+straight to Ollama's own API, bypassing the gateway and `ai-service` entirely, measured **109.8
+seconds** for the exact same cold load, on a target machine whose load average (6.15/11.71/9.67)
+was running at up to ~2x its 6 cores with swap already active. Phase 11's ~50.5s cold-load
+measurement (ADR-29) was real, but was taken on a quieter machine; the 90s/95s timeout margin built
+from it assumed broadly similar conditions, which did not hold this time. No code change resulted
+— this is a host-resource-contention finding, not a gateway or `ai-service` defect, confirmed
+precisely by the fact that the two distinct 504 error codes/messages correctly told apart *which*
+service's timeout fired each time. See `docs/troubleshooting.md`'s Phase 12 section for the full
+evidence and the exact diagnostic commands used.
+
+## 8. Known limitations, honestly
+
 - **Rate limiting and quota are per-pod, in-memory, and lost on restart** (section 2.1's
   `ratelimit.py`) — multiplied by `replicaCount` (deliberately `1` for the gateway in this
   delivery, precisely to make that limitation visible rather than hidden behind an
   already-multiplied number). The production equivalent is a Redis-backed shared limiter, named
   and not built.
-- **No Sealed Secrets for `GATEWAY_API_KEYS_JSON`.** Applied via a direct `helm upgrade --install`
-  for dev only, outside GitOps, specifically so no cleartext key is ever committed to
-  `polaris-gitops`. Phase 15's scope, not silently faked here.
+- **No Sealed Secrets for `GATEWAY_API_KEYS_JSON`, and `ignoreDifferences` does not protect it
+  from `selfHeal` either (section 7.2) — a confirmed, open gap, not a silently accepted one.**
+  Phase 15's scope.
+- **Daily quota was not driven to real exhaustion against the cluster** (section 7.3) — confirmed
+  by code review and unit tests only, a deliberate scope decision given the identical code path
+  rate limiting already proved live.
 - **Streaming (SSE) and an Envoy Gateway evaluation are both scoped "if practical" / optional in
   this phase's own roadmap line, and are not attempted** — `ai-service`'s `/v1/chat` itself is not
   a streaming endpoint yet, so there is nothing for the gateway to stream through.
@@ -229,7 +314,8 @@ otel-enabled app instances in one process).
   `gateway.enabled` (section 1). A compromised pod inside the same namespace could still reach
   `ai-service` directly; this is the same trust boundary every earlier phase in this project has
   drawn at the namespace/`NetworkPolicy` level, not a new gap introduced here.
+- **A duplicate `Date` response header on every proxied response** (section 7.3) — cosmetic only.
 
 See ADR-30 for the full reasoning behind every default and simplification named above, and
-`docs/troubleshooting.md`'s Phase 12 section for the real bug found while building this phase in
-the sandbox.
+`docs/troubleshooting.md`'s Phase 12 section for every real bug and finding from both the sandbox
+and the target machine.

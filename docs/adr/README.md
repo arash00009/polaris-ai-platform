@@ -358,7 +358,18 @@ Revisit when: `polaris-staging`/`polaris-prod` are wired up to Ollama (would nee
 
 ### ADR-30: `ai-gateway` — a separate FastAPI service, in-memory per-tenant rate limit/quota, and the project's first real Kubernetes Secret
 
-Status: accepted.
+Status: accepted; **confirmed on the target machine, 2026-10-05/07.** Auth (401), tenant-mismatch
+rejection (403), per-tenant rate limiting (429 with `Retry-After`, burst=20 exactly), a genuinely
+successful proxied chat (200), request-id propagation, and one real cross-service Tempo trace with
+correct parent/child span linkage were all confirmed against the real cluster. Two more real bugs
+were found only by actually running this phase against a real cluster (a Helm `--set-string`
+JSON-corruption bug, and a GitOps image-promotion script that had never been taught about the
+gateway — see the two new Decision bullets below and `docs/troubleshooting.md`'s Phase 12 section
+for the full detail), on top of the one sandbox bug this ADR already recorded. One genuine,
+still-open limitation was also confirmed, not just theorized: `ignoreDifferences` on the Argo CD
+`Application` does not actually stop `selfHeal` from reverting the gateway's real Secret back to
+the chart's placeholder, tested twice with the live object confirmed correctly configured both
+times (see the new Decision bullet on this below).
 
 Context: `docs/architecture.md` section 4.1 names a dedicated **Traffic** layer (`ai-gateway`),
 separate from the **Application** layer (`ai-service`), responsible for auth, per-tenant rate
@@ -422,6 +433,39 @@ Decision:
 - **`x-api-key` is stripped before forwarding to `ai-service`.** The gateway's own credential —
   the thing that proves tenant identity — must never reach the upstream service, which has no
   business seeing it.
+- **`--set-file`, not `--set-string`, for `gateway.apiKeysJson`, confirmed necessary by a real
+  bug.** Helm's `--set`/`--set-string` strvals mini-language parses its argument as its own small
+  grammar; a raw JSON blob's unescaped `{`, `}`, `"`, `:` are structural to that grammar, not
+  passed through literally — confirmed directly by decoding the live Secret and finding
+  `["sk-...": "demo"]` instead of `{"sk-...": "demo"}`, and by the gateway's own pydantic
+  validator rejecting the corrupted value with a real `ValidationError` on every request.
+  `scripts/deploy/helm.sh`'s `gateway_api_keys_json_for()` now returns a file path (with a
+  `mktemp`-based `"{}"` fallback) instead of file content, and the call site uses `--set-file`,
+  which passes a file's bytes through untouched.
+- **`scripts/gitops/bump-image-tag.sh` gained gateway-awareness, confirmed necessary by a real
+  bug.** Argo CD's own render of `ai-platform-dev` failed outright
+  (`gateway.image.tag is required`) because this script, written for Phase 8 before the gateway
+  existed, only ever wrote `ai-service`'s own tag into `environments/<env>/image.yaml`. It now
+  also writes a `gateway: {image: {...}}` block, gated on the same `gateway_enabled_for()` check
+  `scripts/deploy/helm.sh` already uses, so an environment with the gateway off is unaffected.
+- **`ignoreDifferences` on the Argo CD `Application`, confirmed NOT sufficient to protect the
+  gateway's Secret from `selfHeal`.** `apps/dev-app.yaml` carries a `jsonPointers: [/data,
+  /stringData]` entry for `ai-gateway-api-keys`, intended to let the chart's `"{}"` placeholder
+  and the real, directly-applied Secret coexist. Tested twice, independently, on the real
+  cluster: the entry is genuinely present on the live `Application` object's `spec`, `status`,
+  and its `last-applied-configuration` annotation both times, and `selfHeal` still reverted the
+  Secret's real content to `"{}"` regardless. This is now accepted as a real, confirmed
+  limitation of this mechanism against this resource/field combination, not a configuration
+  mistake to keep chasing — the durable fix remains the one this ADR already named below (Sealed
+  Secrets/External Secrets Operator/Vault, Phase 15), and a temporary `syncPolicy.automated`
+  pause (re-applying the real Secret, then always restoring automated sync afterward) is the
+  workaround used for testing, never a permanent state.
+- **Daily quota (`quota_per_day: 2000`) was deliberately not driven to real exhaustion against
+  the cluster.** It shares the identical `_error_response(429, ...)` code path that per-tenant
+  rate limiting already proved end-to-end on the real cluster, gated only by a different
+  counter/threshold — firing 2,000 requests at an already resource-constrained target machine for
+  that marginal confirmation was judged not worth it. Confirmed by code review and the sandbox's
+  own unit tests only; a deliberate scope decision, named here rather than silently skipped.
 
 Alternatives: an API gateway product (Envoy Gateway, Kong) instead of a hand-written FastAPI
 service — `docs/architecture.md` section 18 explicitly scopes an Envoy Gateway evaluation as
@@ -438,21 +482,25 @@ coverage, `ruff check`/`ruff format --check` clean); six new Helm templates
 (`gateway-deployment/-service/-configmap/-secret/-networkpolicy/-servicemonitor.yaml`) plus
 `_helpers.tpl`/`ingress.yaml`/`networkpolicy.yaml` changes; a new `scripts/build/gateway-image.sh`
 and a full `gateway-*`/`gateway-image-*` `Makefile` target block; `scripts/deploy/helm.sh` gains
-gateway-awareness in `lint`/`template`/`apply`/`logs`/`smoke`; a new, gitignored-by-pattern
-`deploy/platform/gateway/api-keys.*.local.json` (with a committed `.example.json` template); a new
-`docs/gateway.md`. **Status: written and unit-tested in the sandbox only — not yet run against a
-real cluster.** No Docker daemon, `helm` binary or cluster exists in this sandbox (confirmed:
-`docker info` fails; `get.helm.sh` is blocked by the sandbox's egress proxy with HTTP 403), so the
-image build, the chart's rendered output, and the gateway's behaviour against a real `ai-service`
-are all reviewed, not yet executed — the next session's first job on the target machine.
+gateway-awareness in `lint`/`template`/`apply`/`logs`/`smoke` (and, confirmed necessary on the
+target machine, `--set-file` instead of `--set-string` for the Secret's JSON value);
+`scripts/gitops/bump-image-tag.sh` gains the same gateway-awareness for image-tag promotion,
+also confirmed necessary by a real `ComparisonError` on the target machine; a new, gitignored-by-
+pattern `deploy/platform/gateway/api-keys.*.local.json` (with a committed `.example.json`
+template); a new `docs/gateway.md`. **Status: confirmed on the target machine, 2026-10-05/07** —
+built, pushed, deployed through GitOps (`scripts/gitops/bump-image-tag.sh --push`, not the direct
+`helm upgrade --install` this ADR originally assumed, since `polaris-dev` has been GitOps-managed
+since Phase 8), and exercised end to end against a real `ai-service` and a real Ollama backend.
+See `docs/gateway.md` section 7 and `docs/troubleshooting.md`'s Phase 12 section for the complete,
+honest accounting of what was found.
 
-Revisit when: the target-machine run (section 5 of `docs/gateway.md`) either confirms this design
-or surfaces a real bug the sandbox's `httpx.MockTransport` fakes could not have caught; Phase 14
-(multi-tenancy) needs per-tenant-*configured* rate-limit/quota numbers instead of one flat default
-for every tenant; `gateway.replicaCount` is ever raised above `1` (the in-memory limiter stops
-being merely demonstrative and starts being actively wrong); Phase 15 (Sealed Secrets takes over
-`GATEWAY_API_KEYS_JSON`); streaming is added to `/v1/chat` (this gateway's proxy would need to
-support SSE, not attempted this phase).
+Revisit when: Phase 14 (multi-tenancy) needs per-tenant-*configured* rate-limit/quota numbers
+instead of one flat default for every tenant; `gateway.replicaCount` is ever raised above `1` (the
+in-memory limiter stops being merely demonstrative and starts being actively wrong); Phase 15
+(a real secret manager takes over `GATEWAY_API_KEYS_JSON` — confirmed necessary, not just
+theorized, by the `ignoreDifferences` limitation above); streaming is added to `/v1/chat` (this
+gateway's proxy would need to support SSE, not attempted this phase); the daily quota path is
+ever driven to real exhaustion against a live cluster (deliberately not done this phase).
 
 ## Template for a new record
 
