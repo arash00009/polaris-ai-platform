@@ -1,0 +1,36 @@
+# deploy/platform/finops/opencost-values.yaml -- Phase 13 (confirmed on target machine, 2026-10-08)
+opencost:
+  prometheus:
+    internal:
+      enabled: true
+      namespaceName: observability
+      serviceName: kube-prometheus-stack-prometheus
+      port: 9090
+  metrics:
+    serviceMonitor:
+      enabled: true
+  customPricing:
+    enabled: true
+    provider: custom
+    costModel:
+      description: "Polaris local illustrative rate card -- NOT real billing data (see docs/finops.md)"
+      CPU: 0.03
+      RAM: 0.004
+      storage: 0.0001
+  exporter:
+    resources:
+      requests:
+        cpu: 20m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+  resources:
+    requests:
+      cpu: 20m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  ui:
+    enabled: true
