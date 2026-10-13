@@ -7,7 +7,7 @@ for this phase: *"Three tenants with quotas, limits, attributed telemetry and co
 
 **Confirmed on the target machine, 2026-10-13.** `app/gateway`'s suite (51 → 64 tests, 96.51 %
 coverage, `ruff check`/`ruff format --check` clean) was already green in the sandbox; the real
-run on Darya additionally found and fixed three genuine target-machine bugs ((none of them in
+run on Darya additionally found and fixed three genuine target-machine bugs (none of them in
 `gateway/ratelimit.py`/`config.py` themselves — see `docs/troubleshooting.md`'s Phase 14 section
 for all of them) before `make tenants-smoke` produced its first real, trustworthy result:
 **acme (42) > demo (23) > globex (9)** survived requests before each tenant's own configured

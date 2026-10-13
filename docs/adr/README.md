@@ -504,9 +504,13 @@ ever driven to real exhaustion against a live cluster (deliberately not done thi
 
 ### ADR-31: Tenant-attribution counters in `ai_service`/`ai-gateway`, OpenCost for shared-resource cost, a local illustrative rate card
 
-Status: accepted; **built and tested in the sandbox; the OpenCost install, the dashboard, and
-two named gaps below are still the target-machine verification step (no cluster in this
-sandbox).**
+Status: accepted; **confirmed on the target machine, 2026-10-08.** `make finops-install` ran for
+real on Darya (OpenCost `2/2 Running`, resolved to `opencost-2.5.32`, now pinned). Both gaps named
+below were checked for real, not assumed: the Prometheus Service name was confirmed correct as-is;
+the ServiceMonitor question needed and got a real fix, now confirmed live (real
+`node_cpu_hourly_cost`/`container_cpu_allocation` series flowing — see the updated gap bullet
+below). The dashboard's cost panels rendering real non-zero numbers in Grafana itself is still
+the one remaining confirmation step.
 
 Context: `docs/architecture.md` section 11 ("FinOps flow") and section 18's roadmap line for this
 phase ("Tenant → requests → resources → *estimated* cost dashboard; OpenCost evaluated") specify
@@ -585,18 +589,27 @@ Decision:
   judged more likely to produce a confident-looking but meaningless figure than a useful one
   before either cost base is confirmed for real. Named here as a deliberate scope decision, not
   a silent gap.
-- **Two things are named as open, unconfirmed gaps rather than guessed at**, exactly the
-  discipline this project already applies to `OLLAMA_IMAGE_REGISTRY` (Phase 11) and the
-  gateway's `ignoreDifferences` limitation (ADR-30): (1) `opencost-values.yaml`'s
-  `prometheus.internal.serviceName: kube-prometheus-stack-prometheus` is inferred from the
-  standard Helm `fullnameOverride` convention applied to `kube-prometheus-stack-values.yaml`'s
-  own `fullnameOverride: kube-prometheus-stack`, never confirmed against a real `kubectl -n
-  observability get svc` (no cluster in this sandbox); (2) whether Prometheus itself scrapes
-  OpenCost's own cost-allocation metrics back out needs a real `helm show values opencost-
-  charts/opencost` check on the target machine — OpenCost's own docs point at a *separate* chart
-  (`prometheus-community/prometheus-opencost-exporter`) for that, not a flag on this one, and
-  guessing a values key risked either silently doing nothing or an outright `helm install`
-  schema-validation failure.
+- **Two things named as open, unconfirmed gaps in the sandbox delivery — both checked for real on
+  the target machine, 2026-10-08**, exactly the discipline this project already applies to
+  `OLLAMA_IMAGE_REGISTRY` (Phase 11) and the gateway's `ignoreDifferences` limitation (ADR-30):
+  (1) `opencost-values.yaml`'s `prometheus.internal.serviceName: kube-prometheus-stack-prometheus`
+  was inferred from the standard Helm `fullnameOverride` convention — `kubectl -n observability
+  get svc` on the real cluster confirmed exactly that Service and port; the inference held, no
+  fix needed. (2) whether Prometheus scrapes OpenCost's own cost-allocation metrics back out —
+  the sandbox's best guess, from OpenCost's own docs alone, was that a *separate* chart
+  (`prometheus-community/prometheus-opencost-exporter`) would be needed. `helm show values
+  opencost-charts/opencost` on the real target machine proved that guess wrong: the installed
+  chart has its own toggle, `opencost.metrics.serviceMonitor.enabled` (default `false`, and
+  genuinely not scraped beforehand — confirmed empirically via `kubectl -n observability exec
+  deploy/kube-prometheus-stack-prometheus -- wget -qO- localhost:9090/api/v1/targets | grep -i
+  opencost` returning nothing). `opencost-values.yaml` now sets this to `true`; no second chart
+  needed, matching the same `serviceMonitorSelector: {}` cluster-wide discovery (ADR-27) every
+  other ServiceMonitor in this project already relies on. After the re-deploy, Prometheus
+  Operator needed roughly a minute to reconcile the new `ServiceMonitor` before it showed up as a
+  healthy target — an immediate re-check still came back empty and was not the final answer.
+  Once it propagated, `serviceMonitor/finops/opencost/0` showed `up`, and real series confirmed
+  flowing: `node_cpu_hourly_cost` returned `0.03` (the rate card's own `CPU` value) and
+  `count(container_cpu_allocation)` returned `42`. Gap closed for good.
 
 Alternatives: Kubecost — rejected, same reasoning as `docs/architecture.md` section 5 already
 gives (free-tier registration/limits). A new, separate `finops`-only Prometheus just for
@@ -615,26 +628,28 @@ lint/format clean) — both still above the project's 95 % coverage gate, both `
 `make gateway-check` confirmed. A new `deploy/platform/finops/` (namespace, OpenCost values, a
 seven-panel dashboard JSON + generated ConfigMap), `scripts/bootstrap/finops.sh` (install/status/
 ui/dashboard-configmap/uninstall, mirroring `observability.sh`'s shape), a `finops-*` `Makefile`
-target block, and a new `docs/finops.md`. **Status: not yet run against a real cluster** —
-`make finops-install`, the dashboard actually rendering real cost numbers, and the two named
-gaps above are this phase's target-machine step, same as every previous phase's own handoff.
+target block, and a new `docs/finops.md`. **Status: confirmed on the target machine, 2026-10-08**
+— `make finops-install` succeeded for real, both named gaps were checked rather than assumed, and
+the `serviceMonitor.enabled` fix is confirmed live (real cost-allocation series flowing in
+Prometheus). The dashboard's cost panels rendering real non-zero numbers in Grafana itself is the
+one remaining confirmation step.
 
-Revisit when: the target-machine run confirms or corrects the Prometheus Service name and the
-ServiceMonitor gap above (both get pinned/fixed here, not left open indefinitely); Phase 14
-(multi-tenancy) needs these same counters sliced by more than a flat `tenant_id` (e.g. a tenant
-tier or plan); the rate card needs to reflect a real cloud quote instead of an illustrative one;
-a notional showback price is actually built once the cost base it would divide by is confirmed
-for real.
+Revisit when: the dashboard's cost panels are opened in Grafana and confirmed non-zero against
+real traffic; Phase 14 (multi-tenancy) needs these same counters sliced by more than a flat
+`tenant_id` (e.g. a tenant tier or plan); the rate card needs to reflect a real cloud quote
+instead of an illustrative one; a notional showback price is actually built once the cost base it
+would divide by is confirmed for real.
 
 ### ADR-32: Per-tenant *configured* rate limit/quota (`TenantLimits`), three real tenant tiers, logical not hard multi-tenancy
 
-Status: accepted; **written and verified in the sandbox, 2026-10-13** (`app/gateway`'s suite grew
-from 51 to 64 tests, coverage 96.51 % — up from 96.07 %, still above the project's 95 % gate,
-`ruff check`/`ruff format --check` clean, confirmed with `make gateway-check`). **Not yet
-confirmed on the target machine** — provisioning the real `acme`/`globex` tenant keys and running
-the new `make tenants-smoke` against Darya is this phase's first real run; see
-`docs/multitenancy.md` for the plan and `docs/troubleshooting.md` for where its result will be
-recorded.
+Status: accepted; **confirmed on the target machine, 2026-10-13** (`app/gateway`'s suite grew from
+51 to 64 tests, coverage 96.51 % — up from 96.07 %, still above the project's 95 % gate, `ruff
+check`/`ruff format --check` clean, confirmed with `make gateway-check`). `make tenants-smoke`
+against Darya produced its first real result: `acme (42) > demo (23) > globex (9)` survived
+requests before each tenant's own configured burst (40/20/5) tripped a real `429` — exactly the
+ordering `GATEWAY_TENANT_LIMITS_JSON` configures. Three genuine, target-machine-only bugs were
+found and fixed along the way (none in this ADR's own `ratelimit.py`/`config.py` code) — full
+detail in `docs/multitenancy.md` §5 and `docs/troubleshooting.md`'s Phase 14 section.
 
 Context: ADR-30's own "Revisit when" column named this exact gap the moment Phase 12 shipped:
 *"Phase 14 (multi-tenancy) needs per-tenant-configured rate-limit/quota numbers instead of one
@@ -720,20 +735,23 @@ proving a configured override changes actual `/v1/chat` behaviour, not just a re
 return value. `helm/ai-platform/values.yaml`/`values-dev.yaml` gained `GATEWAY_TENANT_LIMITS_JSON`
 in `gateway.config`; `deploy/platform/gateway/api-keys.dev.example.json` grew from one placeholder
 key to three. A new `scripts/verify/tenant-tiers.sh` (shellchecked clean, `make lint`) and a new
-`tenants-smoke` `Makefile` target. New `docs/multitenancy.md`. **Status: written and verified in
-the sandbox only — not yet confirmed on the target machine.** The real `acme`/`globex` API keys
-still need provisioning in `deploy/platform/gateway/api-keys.dev.local.json` (gitignored) before
-`make helm-apply-dev` can pick up the new config and `make tenants-smoke` can run for real.
+`tenants-smoke` `Makefile` target. New `docs/multitenancy.md`. **Status: confirmed on the target
+machine, 2026-10-13** — `make tenants-smoke` passed with a real, trustworthy result
+(`acme (42) > demo (23) > globex (9)`) after fixing three real target-machine bugs along the way:
+`api-keys.dev.local.json` had never actually been edited from its placeholder content (crash-
+looped the gateway); `scripts/verify/post-deploy.sh`'s `check_ai_answer()` never sent the
+`x-api-key` header the gateway has required since Phase 12, unrelated to this phase's own code;
+and `tenant-tiers.sh`'s own `survival_count()` hardcoded a `--max-time 10` that predated Phase
+11's real (slow) model, making every survived request look like a timeout. All three are detailed
+in `docs/troubleshooting.md`'s Phase 14 section, which also records a real, non-bug environmental
+finding: running `verify-dev` immediately after `tenants-smoke` can trip `verify-dev`'s own
+`504` while Ollama drains the burst test's backlog.
 
 Revisit when: `gateway.replicaCount` is ever raised above `1` (ADR-30's own in-memory-limiter
 condition — ADR-32 inherits it unchanged, does not newly introduce it); a real audit/usage event
 stream is needed (Kafka, named here and in `docs/multitenancy.md` as the production equivalent,
 not built); hard isolation (a namespace, `ResourceQuota`, or `NetworkPolicy` per tenant) is ever
-actually required rather than demonstrated logically; `make tenants-smoke` runs against the real
-target machine for the first time and either confirms this phase's design or finds a real bug —
-either way the result belongs in `docs/troubleshooting.md` and this ADR's Status line, following
-every earlier phase's own discipline.
-
+actually required rather than demonstrated logically.
 
 ## Template for a new record
 
