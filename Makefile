@@ -32,7 +32,9 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	argocd-install argocd-status argocd-password argocd-uninstall gitops-bootstrap \
 	gitops-bump-dev gitops-bump-staging gitops-bump-prod \
 	obs-install obs-status obs-password obs-grafana obs-dashboard-configmap obs-uninstall \
-	model-serving-install model-serving-status model-serving-pull model-serving-uninstall
+	model-serving-install model-serving-status model-serving-pull model-serving-uninstall \
+	finops-install finops-status finops-ui finops-dashboard-configmap finops-uninstall \
+	tenants-smoke
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -354,3 +356,13 @@ finops-dashboard-configmap: ## Regenerate dashboards/finops-dashboard-configmap.
 
 finops-uninstall: ## Remove OpenCost (the Prometheus counters it read from are untouched)
 	./scripts/bootstrap/finops.sh uninstall
+
+# --- Phase 14: multi-tenancy (per-tenant configured rate limit/quota, ADR-32) -------------------
+# Not a new namespace/install like Phase 9/11/13 above -- this phase only adds configuration
+# (GATEWAY_TENANT_LIMITS_JSON) and real tenants to deploy/platform/gateway/api-keys.dev.local.json
+# on top of what Phase 12's gateway already installs. One new check: that the three tenants
+# actually get three different tiers from the real, deployed gateway, not just three tenant_ids
+# sharing one flat limit -- see docs/multitenancy.md.
+
+tenants-smoke: ## Prove demo/acme/globex get three real, ordered rate-limit tiers from the dev release (needs: make helm-apply-dev, real tenant keys provisioned)
+	./scripts/verify/tenant-tiers.sh dev

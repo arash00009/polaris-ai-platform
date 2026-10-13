@@ -13,6 +13,15 @@ a change to one service's config must never be able to silently alter the other'
 Status: written and unit-tested in the sandbox (test_config.py). Not yet run against a real
 Kubernetes Secret for GATEWAY_API_KEYS -- that is this phase's target-machine step, same split
 every earlier Kubernetes-facing phase in this project has followed.
+
+Phase 14 adds ``tenant_limits_json`` (GATEWAY_TENANT_LIMITS_JSON): ADR-30's own "Revisit when"
+column named this exact gap -- "multi-tenancy may need the rate-limit/quota numbers to be
+per-tenant *configured*, not one flat default for every tenant" -- and this is that fix. Unlike
+``api_keys_json`` this is NOT a secret (it holds no credential, only numbers), so it is plain
+config (helm/ai-platform/values.yaml's ``gateway.config`` map, a ConfigMap, same as every other
+non-secret GATEWAY_* setting), not a Kubernetes Secret applied out-of-band -- ADR-30's whole
+reason for bypassing GitOps for api_keys_json (never committing a cleartext credential) simply
+does not apply to a JSON blob of integers.
 """
 
 import json
@@ -64,6 +73,18 @@ class Settings(BaseSettings):
     rate_limit_burst: int = Field(default=20, ge=1, le=100_000)
     quota_per_day: int = Field(default=2_000, ge=1, le=10_000_000)
 
+    # --- Phase 14: per-tenant overrides of the three fields above ---
+    # A JSON object, "<tenant_id>": {"rate_limit_per_minute": N, "rate_limit_burst": N,
+    # "quota_per_day": N} -- every one of the three inner keys is OPTIONAL per tenant; a tenant
+    # with no entry at all, or missing one of the three keys, falls back to this Settings
+    # object's own flat rate_limit_per_minute/rate_limit_burst/quota_per_day for whatever is not
+    # overridden (ratelimit.py's TenantLimits is the one place that fallback happens -- this
+    # field only validates shape and bounds, never resolves a default). Not a SecretStr: these
+    # are tier numbers, not credentials, and belong in the plain ConfigMap (see module
+    # docstring) -- a tenant_id appearing here is not itself sensitive (it already appears in
+    # api_keys_json's own values, and in every Prometheus series Phase 13 already exports).
+    tenant_limits_json: str = Field(default="{}")
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["text", "json"] = "text"
     ready_timeout_s: float = Field(default=2.0, gt=0, le=30)
@@ -91,6 +112,48 @@ class Settings(BaseSettings):
                 raise ValueError(f"API key is shorter than {MIN_API_KEY_LENGTH} characters")
             if not isinstance(tenant_id, str) or not re.fullmatch(TENANT_ID_PATTERN, tenant_id):
                 raise ValueError(f"'{tenant_id}' is not a valid tenant_id")
+        return value
+
+    @field_validator("tenant_limits_json")
+    @classmethod
+    def _tenant_limits_must_be_well_formed(cls, value: str) -> str:
+        # Bounds duplicated from the three Field(...) declarations above on purpose -- a
+        # per-tenant override that bypassed the SAME bound the flat default enforces (e.g. a
+        # typo'd quota_per_day of 10_000_000_000) would be a much worse surprise on a real
+        # cluster than a rejected deploy here. "Known keys only" (rather than ignoring an
+        # unrecognised one) follows ADR-23's lesson about a config value that looks like it did
+        # something but silently didn't: a misspelled "rate_limit_burst" -> "rate_limit_brust"
+        # must fail loudly, not quietly apply the flat default and look configured.
+        allowed_keys = {"rate_limit_per_minute", "rate_limit_burst", "quota_per_day"}
+        bounds = {
+            "rate_limit_per_minute": (1, 100_000),
+            "rate_limit_burst": (1, 100_000),
+            "quota_per_day": (1, 10_000_000),
+        }
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("GATEWAY_TENANT_LIMITS_JSON must be a JSON object") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("GATEWAY_TENANT_LIMITS_JSON must be a JSON object, not a list/scalar")
+        for tenant_id, overrides in parsed.items():
+            if not re.fullmatch(TENANT_ID_PATTERN, tenant_id):
+                raise ValueError(f"'{tenant_id}' is not a valid tenant_id")
+            if not isinstance(overrides, dict):
+                raise ValueError(f"tenant '{tenant_id}': value must be a JSON object")
+            unknown = set(overrides) - allowed_keys
+            if unknown:
+                raise ValueError(f"tenant '{tenant_id}': unknown key(s) {sorted(unknown)}")
+            for key, number in overrides.items():
+                low, high = bounds[key]
+                if (
+                    not isinstance(number, int)
+                    or isinstance(number, bool)
+                    or not (low <= number <= high)
+                ):
+                    raise ValueError(
+                        f"tenant '{tenant_id}': '{key}' must be an integer in [{low}, {high}]"
+                    )
         return value
 
     @model_validator(mode="after")

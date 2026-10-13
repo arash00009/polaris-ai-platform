@@ -153,6 +153,13 @@ gateway:
     GATEWAY_RATE_LIMIT_PER_MINUTE: "60"
     GATEWAY_RATE_LIMIT_BURST: "20"
     GATEWAY_QUOTA_PER_DAY: "2000"
+    # Phase 14: per-tenant overrides of the three flat defaults just above -- ADR-30's own
+    # "Revisit when" column named this exact gap. "{}" here (every tenant gets the flat
+    # defaults, i.e. this phase's starting point) on purpose -- same "shared defaults stay off/
+    # generic, only values-dev.yaml turns a feature on with real numbers" pattern as
+    # gateway.enabled itself above. NOT a Secret (unlike apiKeysJson below): these are tier
+    # numbers, not credentials -- see gateway/config.py's module docstring and ADR-32.
+    GATEWAY_TENANT_LIMITS_JSON: "{}"
     GATEWAY_OTEL_ENABLED: "false"
     GATEWAY_OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.observability.svc.cluster.local:4318"
     # GATEWAY_ENVIRONMENT and GATEWAY_UPSTREAM_TIMEOUT_S are set per values-<env>.yaml, not

@@ -68,7 +68,7 @@ from gateway import __version__
 from gateway.auth import API_KEY_HEADER, ApiKeyStore
 from gateway.config import Settings
 from gateway.logging_setup import configure_logging
-from gateway.ratelimit import DailyQuota, TokenBucketLimiter
+from gateway.ratelimit import DailyQuota, TenantLimits, TokenBucketLimiter
 from gateway.schemas import TENANT_ID_PATTERN, ErrorBody, ErrorResponse, StatusResponse
 from gateway.telemetry import setup_telemetry, shutdown_telemetry
 
@@ -162,11 +162,12 @@ def create_app(
             # narrower, non-global instrumentation ai_service's own comment said made the
             # process-global form "not worth the risk".
             HTTPXClientInstrumentor().instrument_client(app.state.http_client)
-        app.state.rate_limiter = TokenBucketLimiter(
-            capacity=settings.rate_limit_burst,
-            rate_per_second=settings.rate_limit_per_minute / 60.0,
-        )
-        app.state.quota = DailyQuota(limit=settings.quota_per_day)
+        # Phase 14: one TenantLimits, shared by both structures below, so a tenant's rate-limit
+        # and quota overrides always come from the exact same GATEWAY_TENANT_LIMITS_JSON read --
+        # never two independently-parsed copies that could drift if this code is ever split.
+        tenant_limits = TenantLimits.from_settings(settings)
+        app.state.rate_limiter = TokenBucketLimiter(limits=tenant_limits)
+        app.state.quota = DailyQuota(limits=tenant_limits)
         try:
             yield
         finally:

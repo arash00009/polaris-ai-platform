@@ -58,6 +58,21 @@ gateway:
     # default staying in sync with a number that lives in a different file).
     GATEWAY_UPSTREAM_TIMEOUT_S: "95"
     GATEWAY_OTEL_ENABLED: "true"
+    # Phase 14: the three real tenants this phase's "Done when" line asks for (docs/
+    # architecture.md section 18), each on a genuinely different tier -- not three tenant_ids
+    # sharing one flat limit, which is what every tenant got before this phase (ADR-30's
+    # "Revisit when" column, now closed by ADR-32). "demo" is deliberately NOT listed here: it
+    # has no entry, so it falls back to this chart's flat GATEWAY_RATE_LIMIT_*/GATEWAY_QUOTA_*
+    # defaults above (the "standard" tier) -- keeping helm.sh's own `helm-smoke` check (which
+    # calls the "demo" tenant) working unchanged, and giving every tenant a concrete tier
+    # rather than a silent default for the two configured below:
+    #   acme   -- "premium": 2x the standard rate/burst, 2.5x the daily quota.
+    #   globex -- "trial":   1/6 the standard rate/burst, 1/10 the daily quota.
+    # Plain config (this is a ConfigMap, not apiKeysJson's Secret) because these are tier
+    # numbers, not credentials -- see gateway/config.py's module docstring and ADR-32.
+    GATEWAY_TENANT_LIMITS_JSON: >-
+      {"acme": {"rate_limit_per_minute": 120, "rate_limit_burst": 40, "quota_per_day": 5000},
+      "globex": {"rate_limit_per_minute": 10, "rate_limit_burst": 5, "quota_per_day": 200}}
   # Overridden at install time by scripts/deploy/helm.sh's cmd_apply from
   # deploy/platform/gateway/api-keys.dev.local.json (gitignored; see
   # deploy/platform/gateway/api-keys.dev.example.json for the format). Left at the chart's own

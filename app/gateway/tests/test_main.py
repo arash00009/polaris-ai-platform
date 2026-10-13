@@ -182,6 +182,40 @@ def test_rate_limit_and_quota_are_per_tenant(build_client):
     assert acme_first.status_code == 200
 
 
+def test_tenant_limits_json_override_actually_changes_gateway_behaviour(build_client):
+    """Phase 14, end to end: two tenants share one flat default (burst 1), but one of them
+    has a configured override (burst 5) via GATEWAY_TENANT_LIMITS_JSON -- it must survive
+    exactly as many requests as ITS OWN override says, not the flat default."""
+    import json
+
+    from gateway.auth import ApiKeyStore
+
+    other_key = "sk-globex-0123456789abcdef"
+    keys = ApiKeyStore.from_mapping({DEMO_API_KEY: DEMO_TENANT, other_key: "globex"})
+    settings = Settings(
+        rate_limit_per_minute=1,
+        rate_limit_burst=1,
+        quota_per_day=1000,
+        tenant_limits_json=json.dumps({"globex": {"rate_limit_burst": 5}}),
+    )
+    test_client, _ = build_client(settings=settings, keys=keys)
+    with test_client as tc:
+        headers_demo = {**auth_headers(DEMO_API_KEY), "content-type": "application/json"}
+        headers_globex = {**auth_headers(other_key), "content-type": "application/json"}
+        demo_statuses = [
+            tc.post("/v1/chat", content=chat_body(DEMO_TENANT), headers=headers_demo).status_code
+            for _ in range(2)
+        ]
+        globex_statuses = [
+            tc.post("/v1/chat", content=chat_body("globex"), headers=headers_globex).status_code
+            for _ in range(6)
+        ]
+    # demo: flat default burst 1 -> first request ok, second rejected.
+    assert demo_statuses == [200, 429]
+    # globex: configured burst 5 -> five requests ok, sixth rejected.
+    assert globex_statuses == [200, 200, 200, 200, 200, 429]
+
+
 def test_healthz_does_not_depend_on_upstream(build_client):
     test_client, _ = build_client(handler=unreachable_handler())
     with test_client as tc:

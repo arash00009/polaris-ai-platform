@@ -44,6 +44,54 @@ def test_settings_repr_never_contains_the_raw_api_keys_json():
     assert "sk-0123456789abcdef" not in str(settings)
 
 
+def test_default_settings_have_no_tenant_limit_overrides():
+    assert json.loads(Settings().tenant_limits_json) == {}
+
+
+def test_tenant_limits_json_must_be_valid_json():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json="not json")
+
+
+def test_tenant_limits_json_must_be_an_object_not_a_list():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps(["acme"]))
+
+
+def test_tenant_limits_json_rejects_an_invalid_tenant_id():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"Not Valid!": {"quota_per_day": 10}}))
+
+
+def test_tenant_limits_json_rejects_a_non_object_override():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": 120}))
+
+
+def test_tenant_limits_json_rejects_an_unknown_key():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": {"rate_limit_brust": 40}}))
+
+
+def test_tenant_limits_json_rejects_a_value_outside_bounds():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": {"quota_per_day": 0}}))
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": {"quota_per_day": 10_000_001}}))
+
+
+def test_tenant_limits_json_rejects_a_non_integer_value():
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": {"rate_limit_burst": 1.5}}))
+    with pytest.raises(ValidationError):
+        Settings(tenant_limits_json=json.dumps({"acme": {"rate_limit_burst": True}}))
+
+
+def test_tenant_limits_json_accepts_a_well_formed_partial_override():
+    settings = Settings(tenant_limits_json=json.dumps({"acme": {"quota_per_day": 5_000}}))
+    assert json.loads(settings.tenant_limits_json) == {"acme": {"quota_per_day": 5_000}}
+
+
 def test_openai_compat_style_backend_timeout_defaults_above_phase_11s_90s_dev_setting():
     # Phase 11 raised POLARIS_BACKEND_TIMEOUT_S to 90 in values-dev.yaml after a real cold
     # Ollama load measured ~50.5s (ADR-29). This gateway's own upstream_timeout_s must default

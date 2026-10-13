@@ -626,6 +626,115 @@ tier or plan); the rate card needs to reflect a real cloud quote instead of an i
 a notional showback price is actually built once the cost base it would divide by is confirmed
 for real.
 
+### ADR-32: Per-tenant *configured* rate limit/quota (`TenantLimits`), three real tenant tiers, logical not hard multi-tenancy
+
+Status: accepted; **written and verified in the sandbox, 2026-10-13** (`app/gateway`'s suite grew
+from 51 to 64 tests, coverage 96.51 % — up from 96.07 %, still above the project's 95 % gate,
+`ruff check`/`ruff format --check` clean, confirmed with `make gateway-check`). **Not yet
+confirmed on the target machine** — provisioning the real `acme`/`globex` tenant keys and running
+the new `make tenants-smoke` against Darya is this phase's first real run; see
+`docs/multitenancy.md` for the plan and `docs/troubleshooting.md` for where its result will be
+recorded.
+
+Context: ADR-30's own "Revisit when" column named this exact gap the moment Phase 12 shipped:
+*"Phase 14 (multi-tenancy) needs per-tenant-configured rate-limit/quota numbers instead of one
+flat default for every tenant."* `docs/architecture.md` section 18's "Done when" for this phase:
+*"Three tenants with quotas, limits, attributed telemetry and cost."* Attributed telemetry and
+cost are **already done** — ADR-31's `tenant_id`-labelled counters and the FinOps dashboard
+already slice by tenant, and nothing about resolving a flat vs. per-tenant limit changes what a
+request is labelled with. The only genuine gap left was the "quotas, limits" half: every tenant
+calling through `ai-gateway` got the identical `GATEWAY_RATE_LIMIT_*`/`GATEWAY_QUOTA_*` numbers
+regardless of who they were, which satisfies "three tenants" but not "three tenants *with*
+quotas, limits" in any way that actually distinguishes them. `docs/architecture.md` line 674 also
+pins this phase's ceiling explicitly: *"Multi-tenant concepts — Demonstrated — Logical tenancy,
+not hard isolation."* No Kubernetes-level namespace-per-tenant, `ResourceQuota`, or
+`NetworkPolicy` change was in scope, and none was made.
+
+Decision:
+
+- **A single `TenantLimits` abstraction (`gateway/ratelimit.py`), constructed once in `main.py`'s
+  lifespan and shared by both `TokenBucketLimiter` and `DailyQuota`**, rather than each resolving
+  tenant overrides independently. `TenantLimits.from_settings()` parses the new
+  `GATEWAY_TENANT_LIMITS_JSON` once at startup; `rate_per_minute()`/`burst()`/`quota_per_day()`
+  each fall back to the existing flat `GATEWAY_RATE_LIMIT_*`/`GATEWAY_QUOTA_*` defaults when a
+  tenant has no entry. `TokenBucketLimiter` resolves a tenant's capacity/rate once, at bucket
+  creation (a bucket's capacity cannot sensibly change mid-flight); `DailyQuota` resolves a
+  tenant's limit fresh on every call (so a config change takes effect for a tenant without
+  waiting for its calendar day to roll over).
+- **A new, strict `field_validator` on `GATEWAY_TENANT_LIMITS_JSON`, applying ADR-23's own
+  lesson: a config value that silently "looks configured" but isn't is worse than a loud
+  rejection.** It rejects, not ignores: a tenant_id that fails `ai_service/schemas.py`'s own
+  `TENANT_ID_PATTERN`; an override that is not a JSON object; any key other than
+  `rate_limit_per_minute`/`rate_limit_burst`/`quota_per_day`; and any value that is not an
+  integer within the same bounds (`ge=1`) the flat settings fields already enforce. A misspelled
+  key or an out-of-range number now fails the gateway's own startup validation instead of being
+  silently dropped and the tenant quietly getting the flat default forever.
+- **Three real tenants, not three interchangeable `tenant_id` strings**, provisioned via
+  `deploy/platform/gateway/api-keys.dev.example.json` (now three placeholder entries, up from
+  one) and `values-dev.yaml`'s `GATEWAY_TENANT_LIMITS_JSON`: `demo` (the standard tier — carries
+  no entry at all, so it keeps getting exactly the same flat default it always has, which is also
+  what `helm-smoke`'s own existing contract check calls — zero behaviour change for it), `acme`
+  (premium: 2× the standard rate/burst, 2.5× the daily quota), `globex` (trial: 1/6 the standard
+  rate/burst, 1/10 the daily quota).
+- **Plain `ConfigMap`, not the `Secret` `apiKeysJson` already uses.** Tier numbers are not
+  credentials; `GATEWAY_TENANT_LIMITS_JSON` goes straight into `gateway.config` in both
+  `values.yaml` ("{}" — every tenant gets the flat defaults, this phase's starting point) and
+  `values-dev.yaml` (the real three-tier JSON, as a YAML folded block scalar `>-` so one long
+  JSON string can be wrapped across source lines without breaking its validity — confirmed by
+  parsing the exact folded text with `yaml.safe_load` then `json.loads` in the sandbox before
+  committing it). This mirrors ADR-30's own reasoning for why `apiKeysJson` alone needed a Secret
+  and `--set-file`: the distinguishing fact is "is this a credential," not "is this per-tenant."
+- **A new verification script, `scripts/verify/tenant-tiers.sh`**, duplicating `helm.sh`'s own
+  host/port/key resolution rather than sourcing it (ADR-22's own reasoning: a later change to one
+  already-verified script must never alter another's behaviour by accident). It hammers each of
+  the three tenants' `/v1/chat` through the real ingress until each one 429s, counts survivals,
+  and asserts the ordering `acme > demo > globex` — the one thing this phase adds that
+  `helm-smoke` does not already cover (health, auth, the chat contract). Wired in as `make
+  tenants-smoke`.
+- **No Kafka, no `ResourceQuota`, no per-tenant namespace.** `docs/architecture.md`'s own
+  requirement-coverage matrix names a Kafka-backed usage/audit event stream as this phase's
+  *production* equivalent (row: "Kafka — Documented — 14 — Usage/audit event stream in
+  production") — documented in `docs/multitenancy.md`, not built, the same "name it, don't fake
+  it" treatment ADR-30 already gave a Redis-backed shared limiter and Sealed Secrets. A
+  Kubernetes `ResourceQuota` per tenant was not built either: this project has no
+  namespace-per-tenant to attach one to, and manufacturing one would misrepresent "logical
+  tenancy" as "hard isolation," the exact distinction line 674 draws.
+
+Alternatives: a per-tenant Kubernetes namespace with its own `ResourceQuota`/`NetworkPolicy` —
+rejected outright by `docs/architecture.md` line 674's own scoping, and it would multiply this
+project's namespace count for a demonstration need the gateway-level change already satisfies.
+Letting `GATEWAY_TENANT_LIMITS_JSON` silently ignore an unknown key or an out-of-range value
+instead of rejecting it at startup — rejected per ADR-23's own lesson, repeated here rather than
+re-learned. A Redis-backed shared limiter, so the in-memory limitation ADR-30 already named could
+finally be closed — rejected for this phase specifically: `gateway.replicaCount` is still `1`
+(ADR-30's own condition for revisiting this has not fired), so the per-pod limitation this phase
+inherits is unchanged, not newly introduced, and adding a new stateful dependency to close a gap
+that is not yet actually biting would be solving a problem this phase does not have.
+
+Consequences: `app/gateway`'s suite grew from 51 to 64 tests (96.51 % coverage, up from 96.07 %,
+`ruff check`/`ruff format --check` clean) — new tests for the validator (9 cases: well-formed,
+object-not-list, invalid `tenant_id`, non-object override, unknown key, both out-of-bounds
+directions, non-integer including `bool`, a well-formed partial override), for `TenantLimits`
+itself and both limiter classes picking up its overrides, and one full HTTP end-to-end test
+proving a configured override changes actual `/v1/chat` behaviour, not just a resolver function's
+return value. `helm/ai-platform/values.yaml`/`values-dev.yaml` gained `GATEWAY_TENANT_LIMITS_JSON`
+in `gateway.config`; `deploy/platform/gateway/api-keys.dev.example.json` grew from one placeholder
+key to three. A new `scripts/verify/tenant-tiers.sh` (shellchecked clean, `make lint`) and a new
+`tenants-smoke` `Makefile` target. New `docs/multitenancy.md`. **Status: written and verified in
+the sandbox only — not yet confirmed on the target machine.** The real `acme`/`globex` API keys
+still need provisioning in `deploy/platform/gateway/api-keys.dev.local.json` (gitignored) before
+`make helm-apply-dev` can pick up the new config and `make tenants-smoke` can run for real.
+
+Revisit when: `gateway.replicaCount` is ever raised above `1` (ADR-30's own in-memory-limiter
+condition — ADR-32 inherits it unchanged, does not newly introduce it); a real audit/usage event
+stream is needed (Kafka, named here and in `docs/multitenancy.md` as the production equivalent,
+not built); hard isolation (a namespace, `ResourceQuota`, or `NetworkPolicy` per tenant) is ever
+actually required rather than demonstrated logically; `make tenants-smoke` runs against the real
+target machine for the first time and either confirms this phase's design or finds a real bug —
+either way the result belongs in `docs/troubleshooting.md` and this ADR's Status line, following
+every earlier phase's own discipline.
+
+
 ## Template for a new record
 
 ```

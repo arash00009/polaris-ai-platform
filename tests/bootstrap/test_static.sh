@@ -1341,5 +1341,121 @@ else
   bad "docs/finops.md is missing"
 fi
 
+# --- Phase 14: multi-tenancy (per-tenant configured rate limit/quota) --------------------------
+# No new chart/namespace this phase (logical tenancy, not hard isolation -- docs/architecture.md
+# line 674), so there is no Phase-13-style chart-version/namespace/install-script block here --
+# only what this phase actually added: the TenantLimits config/resolution code, its Helm wiring,
+# the new verification script, and the doc/ADR trail.
+
+# 113. gateway/config.py defines GATEWAY_TENANT_LIMITS_JSON and validates it strictly (rejects,
+# not ignores, an unknown key -- ADR-23's own lesson, applied again here)
+GW_CONFIG="app/gateway/src/gateway/config.py"
+if grep -q 'tenant_limits_json' "$GW_CONFIG" && grep -q '_tenant_limits_must_be_well_formed' "$GW_CONFIG"; then
+  ok "gateway/config.py defines tenant_limits_json and its validator"
+else
+  bad "gateway/config.py is missing tenant_limits_json or its validator"
+fi
+
+# 114. gateway/ratelimit.py's TenantLimits is the one abstraction both TokenBucketLimiter and
+# DailyQuota are built on, not two independent resolvers (Decision bullet 1, ADR-32)
+GW_RATELIMIT="app/gateway/src/gateway/ratelimit.py"
+if grep -q 'class TenantLimits' "$GW_RATELIMIT" \
+  && grep -q 'limits: TenantLimits' "$GW_RATELIMIT"; then
+  ok "gateway/ratelimit.py's TenantLimits is shared by the rate limiter and the daily quota"
+else
+  bad "gateway/ratelimit.py is missing TenantLimits or it is not wired into both limiter classes"
+fi
+
+# 115. helm/ai-platform/values.yaml / values-dev.yaml both carry GATEWAY_TENANT_LIMITS_JSON --
+# "{}" (flat defaults) at the shared-defaults level, the real three-tier JSON only in dev, same
+# "shared stays off/generic, only values-dev.yaml turns it on with real numbers" pattern this
+# project already used for gateway.enabled itself (ADR-30)
+if grep -q 'GATEWAY_TENANT_LIMITS_JSON: "{}"' helm/ai-platform/values.yaml; then
+  ok "values.yaml's shared default for GATEWAY_TENANT_LIMITS_JSON is the empty, flat-defaults '{}'"
+else
+  bad "values.yaml is missing GATEWAY_TENANT_LIMITS_JSON's '{}' shared default"
+fi
+if grep -q 'GATEWAY_TENANT_LIMITS_JSON' helm/ai-platform/values-dev.yaml \
+  && grep -q '"acme"' helm/ai-platform/values-dev.yaml \
+  && grep -q '"globex"' helm/ai-platform/values-dev.yaml; then
+  ok "values-dev.yaml configures real acme/globex tenant-limit overrides"
+else
+  bad "values-dev.yaml is missing GATEWAY_TENANT_LIMITS_JSON or the acme/globex overrides"
+fi
+if have python3; then
+  if python3 -c "
+import re, yaml, json
+doc = yaml.safe_load(open('helm/ai-platform/values-dev.yaml'))
+raw = doc['gateway']['config']['GATEWAY_TENANT_LIMITS_JSON']
+parsed = json.loads(raw)
+assert set(parsed) == {'acme', 'globex'}, parsed
+"; then
+    ok "values-dev.yaml's folded-scalar GATEWAY_TENANT_LIMITS_JSON parses as valid JSON for exactly acme/globex"
+  else
+    bad "values-dev.yaml's GATEWAY_TENANT_LIMITS_JSON does not parse as the expected JSON (see stderr above)"
+  fi
+else
+  bad "python3 not found -- cannot check values-dev.yaml's GATEWAY_TENANT_LIMITS_JSON folded scalar"
+fi
+
+# 116. deploy/platform/gateway/api-keys.dev.example.json lists all three tenants (demo/acme/globex),
+# not just the one Phase 12 shipped with
+GW_KEYS_EXAMPLE="deploy/platform/gateway/api-keys.dev.example.json"
+if grep -q '"demo"' "$GW_KEYS_EXAMPLE" && grep -q '"acme"' "$GW_KEYS_EXAMPLE" \
+  && grep -q '"globex"' "$GW_KEYS_EXAMPLE"; then
+  ok "$GW_KEYS_EXAMPLE lists all three Phase 14 tenants"
+else
+  bad "$GW_KEYS_EXAMPLE is missing one of demo/acme/globex"
+fi
+
+# 117. scripts/verify/tenant-tiers.sh exists, is executable, and asserts the acme > demo > globex
+# tier ordering -- the one new check this phase adds beyond helm-smoke's existing contract check
+TENANT_TIERS_SCRIPT="scripts/verify/tenant-tiers.sh"
+if [[ -f "$TENANT_TIERS_SCRIPT" && -x "$TENANT_TIERS_SCRIPT" ]]; then
+  ok "$TENANT_TIERS_SCRIPT exists and is executable"
+  if grep -q 'acme_ok.*-gt.*demo_ok' "$TENANT_TIERS_SCRIPT" && grep -q 'demo_ok.*-gt.*globex_ok' "$TENANT_TIERS_SCRIPT"; then
+    ok "$TENANT_TIERS_SCRIPT asserts acme > demo > globex"
+  else
+    bad "$TENANT_TIERS_SCRIPT does not assert the expected acme > demo > globex ordering"
+  fi
+else
+  bad "$TENANT_TIERS_SCRIPT is missing or not executable"
+fi
+
+# 118. Makefile: tenants-smoke target exists
+if grep -qE '^tenants-smoke:' Makefile; then
+  ok "Makefile target: tenants-smoke"
+else
+  bad "Makefile is missing target: tenants-smoke"
+fi
+
+# 119. README.md / ADR / component-qa / docs/multitenancy.md all gained a Phase 14 section --
+# same pattern as check 112's Phase 13 equivalent. docs/troubleshooting.md is deliberately NOT
+# checked here: unlike every earlier phase at this point in the static-check file's own history,
+# this phase has not yet had its first real run on the target machine, so there is nothing real
+# to put in that file yet -- adding that check now would either be vacuous or force a fabricated
+# entry, the opposite of this project's own "verify, don't guess" discipline. It belongs here
+# once docs/multitenancy.md's own "not yet confirmed" note is replaced with a real result.
+if grep -E '^\| 14 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 14 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 14 status row still says Planned (or the row is missing/reworded)"
+fi
+if grep -q 'ADR-32' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-32"
+else
+  bad "docs/adr/README.md is missing ADR-32 (multi-tenancy decisions)"
+fi
+if grep -qi 'phase 14' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 14 section"
+else
+  bad "docs/component-qa.md is missing a Phase 14 section"
+fi
+if [[ -f docs/multitenancy.md ]]; then
+  ok "docs/multitenancy.md exists"
+else
+  bad "docs/multitenancy.md is missing"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]
