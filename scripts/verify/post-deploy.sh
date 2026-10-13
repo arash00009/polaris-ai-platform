@@ -46,6 +46,27 @@ namespace_for() { printf 'polaris-%s' "$1"; }
 release_for()   { printf 'ai-platform-%s' "$1"; }
 host_for()      { awk '/^ingress:/{f=1} f && /host:/{gsub(/"/,"",$2); print $2; exit}' "$CHART_DIR/values-$1.yaml"; }
 
+# Phase 12/14 real-bug fix: when gateway.enabled is true for $1 (dev only today),
+# templates/ingress.yaml routes the WHOLE host -- including /v1/chat -- to ai-gateway instead
+# of ai-service, so every request needs x-api-key or the gateway 401s before ai-service is ever
+# reached. check_ai_answer() predates the gateway (Phase 7) and was never taught this when
+# Phase 12 landed -- found for real on the target machine, 2026-10-13 (see
+# docs/troubleshooting.md's Phase 14 section). Deliberately duplicated from scripts/deploy/
+# helm.sh's gateway_enabled_for()/scripts/verify/tenant-tiers.sh's api_key_for() rather than
+# sourced -- ADR-22's reasoning: this script's own already-verified behaviour for staging/prod
+# (gateway.enabled: false, no header, unaffected) must never change because one of those two
+# scripts changes.
+GATEWAY_KEYS_DIR="deploy/platform/gateway"
+gateway_enabled_for() {
+  awk '/^gateway:/{f=1; next} f && /^[a-z]/{f=0} f && /enabled:/{print $2; exit}' "$CHART_DIR/values-$1.yaml"
+}
+api_key_for() {
+  local env="$1" tenant="$2"
+  local file="$GATEWAY_KEYS_DIR/api-keys.$env.local.json"
+  [[ -f "$file" ]] || return 0
+  jq -r --arg t "$tenant" 'to_entries[] | select(.value == $t) | .key' "$file" 2>/dev/null | head -n1
+}
+
 need_env() {
   local env="${1:-}"
   [[ -n "$env" ]] || die "Missing environment. Usage: $0 <dev|staging|prod>"
@@ -103,7 +124,17 @@ check_ready() {
 check_ai_answer() {
   log_info "4/6 POST /v1/chat and check for a real answer, not just the envelope"
   local out
-  if ! out="$(curl -fsS --max-time 10 -H "Host: $HOST" -H 'content-type: application/json' \
+  local -a auth_header=()
+  if [[ "$(gateway_enabled_for "$ENV")" == "true" ]]; then
+    local demo_key
+    demo_key="$(api_key_for "$ENV" demo)"
+    if [[ -z "$demo_key" ]]; then
+      record_fail "ai-answer" "gateway.enabled is true for $ENV but no 'demo' tenant key in $GATEWAY_KEYS_DIR/api-keys.$ENV.local.json -- every request would 401 before reaching ai-service"
+      return
+    fi
+    auth_header=(-H "x-api-key: $demo_key")
+  fi
+  if ! out="$(curl -fsS --max-time "${VERIFY_CHAT_TIMEOUT:-100}" -H "Host: $HOST" "${auth_header[@]}" -H 'content-type: application/json' \
       -d '{"tenant_id":"demo","prompt":"post-deploy verification ('"$ENV"')"}' "$BASE/v1/chat" 2>&1)"; then
     record_fail "ai-answer" "POST /v1/chat failed: $out"
     return

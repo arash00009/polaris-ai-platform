@@ -17,9 +17,15 @@
 # ADR-22's reasoning: a change to one already-verified script must never alter another's
 # behaviour by accident.
 #
-# Status: written and shellchecked in the sandbox, where there is no cluster and no
-# api-keys.dev.local.json (gitignored, provisioned only on the target machine) to run this
-# against. Its first real run is the target-machine verification step for this phase.
+# Status: confirmed on the target machine, 2026-10-13. First real run exposed a genuine bug:
+# this hardcoded --max-time 10, inherited from before Phase 11 put a real (slow, ~20s/request)
+# Ollama model behind every allowed request, so every survived request looked like a curl
+# timeout rather than a 200 and the script never actually measured anything. Fixed by raising
+# the timeout to match post-deploy.sh's real-backend value (see survival_count()'s own comment).
+# Accepted tradeoff: because this hammers sequentially and a real 200 costs ~20s, a full run
+# that actually drives acme's burst of 40 to a real 429 can take 10+ minutes -- chosen over
+# shrinking the attempt budgets and weakening the assertion, so this still proves an actually-
+# observed 429 per tier, not just a relative ordering within an arbitrary smaller window.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,12 +67,23 @@ api_key_for() {
 # transient non-200/429 (e.g. a cold Ollama request still finishing, Phase 11/ADR-29) -- those
 # are not counted as the tenant's burst answer either way, just retried silently up to the
 # attempt budget, since this script is about the rate limiter, not upstream latency.
+#
+# Phase 14 real-bug fix, found for real on the target machine 2026-10-13 (see
+# docs/troubleshooting.md's Phase 14 section): this used to hardcode --max-time 10, copied from
+# post-deploy.sh before Phase 11 put a real (slow) Ollama model behind every ALLOWED request --
+# a genuine 200 here can legitimately take up to ~20s. 10s made every survived request look like
+# a curl timeout, not a 429, so this never actually measured anything. Raised to match
+# post-deploy.sh's own real-backend timeout. Deliberate, accepted consequence: a full, honest
+# run that actually drives acme (burst 40) to a real 429 can now take 10+ minutes, because this
+# still hammers sequentially, one request at a time, and each surviving request pays the real
+# model's latency -- not a bug, a documented tradeoff (see the Status note at the top of this
+# file and ADR-32's Status line).
 survival_count() {
   local tenant="$1" api_key="$2" max_attempts="$3"
   local ok=0 attempt=0 status
   while (( attempt < max_attempts )); do
     attempt=$((attempt + 1))
-    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    status="$(curl -s -o /dev/null -w '%{http_code}' --max-time "${VERIFY_CHAT_TIMEOUT:-100}" \
       -H "Host: $HOST" -H "x-api-key: $api_key" -H 'content-type: application/json' \
       -d "{\"tenant_id\":\"$tenant\",\"prompt\":\"tenant-tiers verify\"}" "$BASE/v1/chat")"
     case "$status" in
@@ -93,7 +110,9 @@ globex_key="$(api_key_for globex)"
 # 20) -- if that file changes, this script's expected ordering below still holds as long as
 # acme > demo > globex stays true, but these three budgets may need raising to keep seeing a
 # real 429 rather than running out of attempts first.
-log_info "Hammering each tenant's /v1/chat until it 429s (burst exhaustion)..."
+log_info "Hammering each tenant's /v1/chat until it 429s (burst exhaustion). Against a real" \
+  "model backend this is sequential and slow -- expect several minutes, worst case 10+ for" \
+  "acme's burst of 40. See the comment above survival_count() if this looks stuck, not hung."
 demo_ok="$(survival_count demo "$demo_key" 25)"
 log_info "demo (standard tier):   $demo_ok requests survived before 429"
 acme_ok="$(survival_count acme "$acme_key" 45)"
