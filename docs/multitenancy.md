@@ -5,12 +5,17 @@ Covers **Phase 14**: three tenants calling through `ai-gateway`, each on a genui
 which is all Phase 12 ever built. `docs/architecture.md` section 18's exact "Done when" wording
 for this phase: *"Three tenants with quotas, limits, attributed telemetry and cost."*
 
-**Verified state: written and verified in the sandbox, 2026-10-13** (`app/gateway`'s suite grew
-from 51 to 64 tests, 96.51 % coverage, `ruff check`/`ruff format --check` clean, `make
-gateway-check` passing with margin above the project's 95 % gate). **Not yet confirmed on the
-target machine** — provisioning the real `acme`/`globex` API keys and running `make
-tenants-smoke` against Darya is this phase's first real run. See §5 for the exact steps and ADR-32
-for the full design record.
+**Confirmed on the target machine, 2026-10-13.** `app/gateway`'s suite (51 → 64 tests, 96.51 %
+coverage, `ruff check`/`ruff format --check` clean) was already green in the sandbox; the real
+run on Darya additionally found and fixed three genuine target-machine bugs ((none of them in
+`gateway/ratelimit.py`/`config.py` themselves — see `docs/troubleshooting.md`'s Phase 14 section
+for all of them) before `make tenants-smoke` produced its first real, trustworthy result:
+**acme (42) > demo (23) > globex (9)** survived requests before each tenant's own configured
+burst limit (40/20/5) tripped a real `429` — the exact ordering `values-dev.yaml`'s
+`GATEWAY_TENANT_LIMITS_JSON` configures, observed against the live gateway, not asserted from a
+unit test. `make verify-dev` also passes end-to-end, including a real proxied `/v1/chat` answer
+(`latency_ms` seen as high as ~77 000 under load — see §5's note on the real model's latency).
+See §5 for the exact steps and real findings, and ADR-32 for the full design record.
 
 ## 1. What this phase actually adds
 
@@ -86,7 +91,7 @@ committing it.
 template for the real, local `api-keys.dev.local.json`) now lists all three tenants instead of
 one.
 
-## 5. Installing and verifying (target machine — not yet run)
+## 5. Installing and verifying (confirmed on the target machine, 2026-10-13)
 
 ```bash
 make gateway-check                                   # local venv: lint + 64 tests + 96.51 % coverage
@@ -110,9 +115,39 @@ through the real ingress until it 429s, counts how many requests survived first,
 three counts are ordered `acme > demo > globex` — the one check this phase adds that
 `helm-smoke`'s existing contract check (auth, health, the chat shape) does not already cover.
 
-This section will be updated with the real result — pass, or a real bug found and fixed, exactly
-like every earlier phase's own "confirmed on the target machine" note — once it actually runs on
-Darya. Until then, treat this phase as sandbox-verified only.
+**Real result, Darya, 2026-10-13:** `acme (42) > demo (23) > globex (9)` — matching the configured
+bursts (40/20/5) exactly, each tenant's own real `429` reached before its attempt budget ran out.
+
+Three genuine, target-machine-only bugs were found and fixed before this result was trustworthy —
+full detail in `docs/troubleshooting.md`'s Phase 14 section:
+
+1. `api-keys.dev.local.json` had never actually been edited from its placeholder content (still
+   had the `_readme` key and `sk-REPLACE-ME-...` example strings), which crash-looped the gateway
+   with a pydantic `ValidationError` ("API key is shorter than 16 characters") until it was
+   regenerated with real keys.
+2. `scripts/verify/post-deploy.sh`'s `check_ai_answer()` predates the gateway (Phase 7) and was
+   never taught that Phase 12's `ingress.yaml` routes dev's *entire* host — including `/v1/chat` —
+   through `ai-gateway`, not `ai-service`, once `gateway.enabled: true`. Every run since Phase 12
+   shipped was silently 401ing; unrelated to this phase's own code, just never caught before now.
+3. `scripts/verify/tenant-tiers.sh`'s `survival_count()` hardcoded `--max-time 10`, inherited from
+   before Phase 11 put a real (~20–80s/request, occasionally more under load) Ollama model behind
+   every allowed request. Every *survived* request looked identical to a curl timeout rather than
+   a `200`, so the burst test never actually measured anything real. Fixed by raising the timeout
+   to the same ~90–95s ceiling `ai-service`/`ai-gateway` themselves use — the accepted tradeoff is
+   that a full, honest run can now take several minutes, worst case 10+ for acme's burst of 40,
+   because this still hammers sequentially and each surviving request pays the real model's
+   latency. Chosen over shrinking the attempt budgets and weakening the assertion to a relative
+   ordering within a smaller window, so this still proves an actually-observed `429` per tier.
+
+One more thing worth naming, not a bug: running `make verify-dev` immediately after
+`make tenants-smoke` can make `verify-dev`'s own single `/v1/chat` check time out (`504`) even
+with the timeout fix above — the burst test just fired dozens of real inference requests at
+Ollama's one CPU-bound pod, and the next request can queue behind that backlog long enough to
+exceed `ai-service`/`ai-gateway`'s own ~90–95s timeout. Confirmed on Darya: two consecutive `504`s
+immediately after a `tenants-smoke` run, pod healthy (no restarts, normal CPU/memory) throughout;
+retrying once more succeeded with `latency_ms: 77010.3`. No code fix — this is an ordering/timing
+fact about sharing one small local model between two verification scripts, not a defect in
+either one.
 
 ## 6. Named, not built: Kafka and hard isolation
 
@@ -151,5 +186,5 @@ what Phase 14 actually demonstrates.
 - **No Kafka audit stream, no hard (namespace-level) isolation** — both named in §6 as this
   phase's deliberate production-equivalent/scope boundary, not silent gaps.
 
-See ADR-32 for the full design record, and `docs/troubleshooting.md` for this phase's real,
-target-machine findings once `make tenants-smoke` has actually run.
+See ADR-32 for the full design record, and `docs/troubleshooting.md`'s Phase 14 section for this
+phase's real, target-machine findings in full.
