@@ -4,6 +4,13 @@
 # policy is implementation-specific. Phase 4 verified this holds on the target machine's k3s;
 # scripts/deploy/helm.sh applies this chart's NetworkPolicy the same way app.sh did — after the
 # Deployment is healthy — and the Phase 5 guide says to re-check readiness per environment.
+#
+# Phase 15 / ADR-34 adds the third object below (ai-service-allow-egress) plus the conditional
+# "Egress" policyType here. Kubernetes NetworkPolicies selecting the same pods are additive, the
+# same way this file's own two ingress objects already combine (a bare default-deny plus however
+# many separate allow-* objects) -- so putting "Egress" into this object's policyTypes with no
+# egress: list switches this pod selector to deny-all-egress-by-default, and
+# ai-service-allow-egress is what adds specific exceptions back, never this object itself.
 {{- if .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -14,7 +21,11 @@ metadata:
     {{- include "ai-platform.labels" . | nindent 4 }}
 spec:
   podSelector: {}
-  policyTypes: ["Ingress"]
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -64,4 +75,65 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.allowPort }}
+{{- if .Values.networkPolicy.egress.enabled }}
+---
+# Phase 15 / ADR-34: what ai-service is actually allowed to call out to, now that the
+# default-deny object above also covers Egress. Four separate `to` entries, not one combined
+# list, for the same reason the ingress object above keeps allowFromNamespace and
+# allowScrapeFromNamespace apart: each is independently reviewable and none can accidentally
+# widen another.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-service-allow-egress
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-platform.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    # DNS. Every workload needs this regardless of what else it talks to -- without it, every
+    # other rule below is moot, since Service DNS names never resolve.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: {{ .Values.networkPolicy.egress.dnsPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.dnsPort }}
+    # model-serving (Ollama, Phase 11) -- only actually used when
+    # config.POLARIS_BACKEND=openai_compat, but the rule itself is unconditional on that string
+    # value (NetworkPolicy has no notion of "this app-level config flag"); an unused allow-rule
+    # for the mock backend is a harmless no-op, not a widened attack surface, since nothing in
+    # the mock path ever originates this connection. model-serving's own NetworkPolicy
+    # (deploy/platform/model-serving/networkpolicy.yaml) separately only accepts ingress from
+    # polaris-dev regardless of what this rule allows out, so staging/prod granting themselves
+    # egress here (same chart, same template, every environment) changes nothing in practice
+    # until that file's own allow-list is ever widened to match -- named, not silently assumed.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.modelServingNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.modelServingPort }}
+    # OTel Collector (Phase 9/10) -- only actually used when config.POLARIS_OTEL_ENABLED=true,
+    # same "harmless unused allow-rule" reasoning as model-serving above. Both OTLP ports
+    # (gRPC 4317, HTTP 4318) are allowed since telemetry.py's own exporter choice is a runtime
+    # config detail this NetworkPolicy does not need to track.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.observabilityNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.otlpGrpcPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.otlpHttpPort }}
+{{- end }}
 {{- end }}

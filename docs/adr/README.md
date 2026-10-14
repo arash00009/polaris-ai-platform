@@ -753,6 +753,193 @@ stream is needed (Kafka, named here and in `docs/multitenancy.md` as the product
 not built); hard isolation (a namespace, `ResourceQuota`, or `NetworkPolicy` per tenant) is ever
 actually required rather than demonstrated logically.
 
+### ADR-33: Sealed Secrets for `GATEWAY_API_KEYS_JSON`, replacing the bypass-GitOps direct `helm upgrade`
+
+Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **not yet confirmed on
+the target machine.** `helm lint`/`helm template`/a real `kubeseal`/a real controller are all
+target-machine-only steps (no `helm`, no cluster, no `kubeseal` in the sandbox this was written
+in — same constraint every previous phase's Helm/cluster work has carried). What was done in the
+sandbox: every new Helm values key was hand-verified against the chart's own real
+`templates/*.yaml` and `values.yaml` (fetched from `raw.githubusercontent.com`, the one
+`*.github.io`-style host this sandbox's egress proxy accepts is `raw.githubusercontent.com`
+itself, not `bitnami-labs.github.io` — confirmed by a direct, failing `curl`), `kubeseal`'s own
+release tarball was downloaded and sha256-verified directly (not from a nonexistent checksums.txt
+— see `versions.env`'s own comment), and `tests/bootstrap/test_static.sh` plus `shellcheck`
+(`make lint`) both pass with the new files included.
+
+Context: ADR-30 named this gap the moment Phase 12 shipped (*"Not wired into Sealed Secrets: that
+is Phase 15's own scope, named here as a gap rather than faked"*) and later confirmed, against the
+real cluster, exactly why the gap mattered: an Argo CD `ignoreDifferences` entry on
+`ai-gateway-api-keys`'s `/data`/`/stringData` fields does **not** stop `selfHeal` from reverting
+the directly-applied, real Secret back to the chart's `"{}"` placeholder — tested twice,
+independently, both times with the live `Application` object confirmed correctly configured.
+`docs/architecture.md`'s own Phase 15 "Done when" line names "secret management" as one of this
+phase's four required pieces.
+
+Decision:
+
+- **The sealed-secrets controller (Bitnami's chart), not External Secrets Operator or Vault** —
+  `docs/architecture.md` section 17 already named Sealed Secrets as this project's intended choice
+  for exactly this gap (*"the durable fix remains... Sealed Secrets/External Secrets Operator/
+  Vault, Phase 15"*, ADR-30's own "Revisit when"), and it needs no external secret-store backend
+  at all — the one property this project's "no paid cloud, no extra backend" constraint actually
+  needs. ESO/Vault are documented as the production-equivalent alternative (see the new Consequence
+  below), not built.
+- **A new `sealedSecrets.enabled` chart-wide toggle, off everywhere until a real target-machine run
+  proves it** — same "prove it in one environment first" pattern `gateway.enabled`/
+  `serviceMonitor.enabled`/`POLARIS_OTEL_ENABLED` already established. `templates/
+  gateway-secret.yaml`'s plain Secret keeps rendering whenever it is off (the Phase 12 path,
+  unchanged default/fallback); a new `templates/gateway-sealedsecret.yaml` renders instead once it
+  is on. The two are mutually exclusive by construction (`and gateway.enabled (not
+  sealedSecrets.enabled)` vs. `and gateway.enabled sealedSecrets.enabled`), never both at once for
+  the same release.
+- **`gateway.apiKeysSealed` holds a SealedSecret's ciphertext directly in the values file,
+  committed as-is** — safe specifically because it is ciphertext, the entire point of Sealed
+  Secrets, the same "label-shaped like a secret, but not one once sealed" distinction ADR-30 drew
+  for `GATEWAY_TENANT_LIMITS_JSON` the other direction (a plain `ConfigMap` because tier numbers
+  are not credentials). This is what actually closes the `ignoreDifferences`/`selfHeal` gap: once
+  the *committed* state is itself safe, `selfHeal` reverting to it is correct behaviour, not
+  something to work around.
+- **A new standalone script, `scripts/deploy/seal-gateway-secret.sh`, not a new `helm.sh`
+  subcommand** — ADR-22's own reasoning: this script shares almost nothing with `helm.sh`'s lint/
+  template/apply/status/logs/smoke/uninstall verbs beyond also reading the same local JSON file,
+  and a later change to one must never alter the other's already-verified behaviour by accident.
+  It builds the plain Secret via `kubectl create secret generic --from-file --dry-run=client`
+  (never a hand-typed/shell-interpolated JSON blob — the exact risk class that corrupted
+  `gateway.apiKeysJson` for real via `--set-string` in ADR-30), pipes it through a real `kubeseal`,
+  and extracts the one ciphertext line with `awk`, not a new PyYAML dependency nothing else in this
+  project needs.
+- **`scripts/deploy/helm.sh`'s `cmd_apply` gained a `sealed_secrets_enabled_for()` check
+  (duplicated from `gateway_enabled_for()`'s own awk-block-scan shape, per ADR-22) that skips the
+  `--set-file gateway.apiKeysJson=...` call entirely once sealed secrets is on for that
+  environment** — not merely redundant at that point, but a needless read of a real tenant/key map
+  off disk for a value nothing renders any more.
+- **Least-privilege RBAC for the controller itself (`rbac.clusterRole: false`, `rbac.
+  namespacedRoles: true`, `additionalNamespaces: [polaris-dev, polaris-staging, polaris-prod]`),
+  not the chart's own default** — confirmed by reading `templates/cluster-role.yaml`/`role.yaml`
+  directly: the chart's unmodified default grants a cluster-scoped `ClusterRole` with
+  create/update/delete on `secrets` in *every* namespace, and `additionalNamespaces` alone (without
+  also setting `rbac.namespacedRoles`/`rbac.clusterRole`) changes nothing about that — it only adds
+  `get` on specific `Namespace` objects for the controller's own `--additional-namespaces` flag.
+  Both settings together are what actually swaps the cluster-wide grant for one namespaced `Role`
+  per listed namespace.
+- **A new `sealed-secrets` namespace, Pod Security `baseline` not `restricted`** — same
+  "the chart's own defaults look restricted-compliant (confirmed by reading `values.yaml`:
+  `runAsNonRoot`, `readOnlyRootFilesystem`, `capabilities.drop: [ALL]`), but that is a claim about
+  what is *requested*, not a target-machine confirmation that this specific upstream image
+  actually starts under it" reasoning `observability`'s and `model-serving`'s own `namespace.yaml`
+  already use.
+
+Alternatives: External Secrets Operator or Vault — both need an external secret-store backend
+(a cloud secret manager, or self-hosting Vault) this project's "no paid cloud, no extra
+stateful backend beyond what each phase already needs" constraint does not want; documented as the
+production-equivalent mapping (`docs/architecture.md` section 14 already lists this), not built.
+Leaving `GATEWAY_API_KEYS_JSON` as a plain Secret and instead trying to actually fix the
+`ignoreDifferences` mechanism — rejected: ADR-30 already confirmed, twice, against the live
+cluster, that the entry is correctly configured and `selfHeal` still reverts it; this is a
+confirmed limitation of the mechanism itself, not a configuration mistake left to keep chasing.
+Writing the SealedSecret directly with `kubectl apply` outside Helm entirely — rejected: it would
+put this project's "one chart, values per environment" pattern aside for exactly the one resource
+this phase is trying to make *more* GitOps-normal, not less.
+
+Consequences: three new files (`helm/ai-platform/templates/gateway-sealedsecret.yaml`, `deploy/
+platform/sealed-secrets/namespace.yaml`, `deploy/platform/sealed-secrets/sealed-secrets-values.
+yaml`), a new `scripts/bootstrap/sealed-secrets.sh` (install/status/fetch-cert/uninstall, same
+shape as `observability.sh`) and `scripts/deploy/seal-gateway-secret.sh` (both shellchecked
+clean), five new `Makefile` targets, and a new `rbac.*`/`additionalNamespaces` block confirmed
+against the chart's real templates rather than assumed. `versions.env` gains
+`SEALED_SECRETS_CHART_VERSION` (deliberately left unpinned, same "resolve for real, then pin"
+two-step as `LOKI_CHART_VERSION`/`OPENCOST_CHART_VERSION` before it) and a sandbox-computed (not
+published-checksums-file-derived) `KUBESEAL_SHA256_AMD64`/`KUBESEAL_SHA256_ARM64`.
+`scripts/bootstrap/install-tools.sh` and `scripts/lib/common.sh`'s `tool_version()` both gained
+`kubeseal` support. `helm/ai-platform/templates/gateway-secret.yaml` and `scripts/deploy/
+helm.sh`'s `cmd_apply` both gained a guard against double-rendering/double-reading once sealed
+secrets is on. **Status: not yet confirmed on the target machine** — `make sealed-secrets-install`,
+`make gateway-seal ENV=dev`, pasting the real ciphertext into `values-dev.yaml`, and a real
+`helm-apply-dev`/Argo CD sync proving the gateway still authenticates correctly with a
+SealedSecret-sourced key are all still pending.
+
+Revisit when: the target-machine run above surfaces a real bug (expected, per this project's own
+established pattern — every previous Helm/cluster-touching phase has found at least one); `gateway.
+enabled` is ever turned on for staging/prod (the same `additionalNamespaces`/`sealedSecrets.
+enabled` steps need repeating for that environment, not automatic); a second real Secret is ever
+needed anywhere in this project (the same pattern, not a new one, would apply).
+
+### ADR-34: Egress NetworkPolicy default-deny for `ai-service`/`ai-gateway`, dev-only until confirmed
+
+Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **not yet confirmed on
+the target machine** (no cluster in the sandbox this was written in; `helm template`/`helm lint`
+against the real binary is the target-machine verification step, same as every previous Helm
+change in this project).
+
+Context: `helm/ai-platform/templates/networkpolicy.yaml`'s own Phase 5/9 comments were explicit
+that `policyTypes` only ever listed `"Ingress"` — egress was unrestricted from Phase 5 through
+Phase 14, `values.yaml`'s own comment naming this directly (*"The Deployment's egress is already
+unrestricted... so nothing extra is needed for the app to push traces/logs out"*).
+`docs/architecture.md`'s Phase 15 "Done when" line names "network policies" as one of this phase's
+four required pieces, alongside secret management (ADR-33), signing and an admission policy (both
+still pending, this phase's remaining scope).
+
+Decision:
+
+- **Extend the existing default-deny objects to also cover `Egress`, rather than adding a second,
+  parallel default-deny object** — Kubernetes NetworkPolicies selecting the same pods are additive
+  (the same way this file's own ingress objects already combine a bare default-deny with however
+  many separate allow-* objects), so putting `Egress` into `ai-service-default-deny`'s
+  `policyTypes` (with no `egress:` list) switches that pod selector to deny-all-egress-by-default,
+  and a new `ai-service-allow-egress` object is what adds exceptions back — never the default-deny
+  object itself. `ai-gateway`'s own pods are already covered by that same object (`podSelector: {}`
+  matches every pod in the namespace), so `gateway-networkpolicy.yaml` only needed its own
+  `ai-gateway-allow-egress` object, not a second default-deny.
+- **Four independently-named allow rules, never one combined "allow everything these two services
+  need" rule** — DNS (every workload needs it, unconditionally), `model-serving` (only actually
+  used when `POLARIS_BACKEND=openai_compat`), the OTel Collector (only actually used when
+  `POLARIS_OTEL_ENABLED`/`GATEWAY_OTEL_ENABLED=true`), and (`ai-gateway` only) `ai-service` itself.
+  An allow-rule for a destination the mock backend or OTel-disabled config never actually calls is
+  a harmless no-op, not a widened attack surface — nothing on that code path ever originates the
+  connection — and keeping each rule separate means a future new egress need is a reviewable
+  one-line addition, not a silent widening of something already there.
+- **Off by default (`networkPolicy.egress.enabled: false`), on only in `values-dev.yaml`** — the
+  same "prove it in one environment first" pattern every other toggle in this chart already uses.
+  Not because a real risk was found for staging/prod specifically (both run the mock backend with
+  OTel off today, so neither actually needs any egress beyond DNS yet) — "no real workload needs it
+  today" is a different claim from "confirmed not to break anything," and this project does not
+  collapse the two.
+- **`model-serving`'s own NetworkPolicy (`deploy/platform/model-serving/networkpolicy.yaml`) was
+  deliberately left untouched, ingress-only** — unlike `ai-service`/`ai-gateway`, Ollama's egress
+  needs span model/image *pull* time (DNS plus HTTPS to a registry, already worked around once for
+  a real, confirmed DNS failure — `OLLAMA_IMAGE_REGISTRY`, `docs/troubleshooting.md` Phase 11), not
+  a small, fully-enumerable allow-list the way `ai-service`'s three destinations are. Hardening that
+  without first confirming exactly what pull-time egress actually requires on this cluster risked
+  breaking a working, already-verified phase for a gap this ADR can name honestly instead: deferred,
+  not silently done.
+
+Alternatives: a single shared `NetworkPolicy` covering both `ai-service` and `ai-gateway`'s egress
+— rejected, since `_helpers.tpl`'s own `gatewaySelectorLabels`/`selectorLabels` split (ADR-30) exists
+specifically so the two Deployments' pod selectors are never combined into one object; a shared
+egress policy would quietly undo that. A `NetworkPolicy` default-deny for `model-serving`'s egress
+too, in this same pass — rejected for now, see the Decision bullet above; named as this ADR's own
+explicit gap, not forgotten. Enabling egress hardening everywhere (including staging/prod) in one
+commit, since neither actually needs any egress today — rejected: "unused today" is not this
+project's bar for "confirmed safe," and every other toggle in this chart has earned a real
+target-machine run in dev before going wider.
+
+Consequences: a new `networkPolicy.egress` block in `values.yaml` (off by default) and
+`values-dev.yaml` (on), a new `ai-service-allow-egress` object in `templates/networkpolicy.yaml`
+and a new `ai-gateway-allow-egress` object in `templates/gateway-networkpolicy.yaml`, both gated on
+the same flag. `values-dev.yaml`'s own comment on `POLARIS_BACKEND=openai_compat`'s model-serving
+DNS name was updated to stop claiming egress is unconditionally unrestricted, since it no longer
+is. **Status: not yet confirmed on the target machine** — a real `helm-apply-dev`, followed by
+`make verify-dev` and `make tenants-smoke` both still passing with egress now default-deny, is the
+real test: if either backend call (model-serving or the OTel Collector) were blocked by a mistake
+in this policy, those are exactly the checks that would catch it, immediately and loudly, not
+silently.
+
+Revisit when: the target-machine run above surfaces a real bug (same expectation ADR-33 states for
+its own target-machine run); `model-serving`'s own egress needs are ever actually enumerated and
+hardened (this ADR's own named, deferred gap); `networkPolicy.egress.enabled` is ever turned on for
+staging/prod (confirm first, the same discipline this ADR itself followed for dev).
+
 ## Template for a new record
 
 ```

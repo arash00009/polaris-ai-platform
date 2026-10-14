@@ -10,6 +10,15 @@ namespace: polaris-dev
 ingress:
   host: ai.localhost
 
+# Phase 15 / ADR-34: dev is the one environment proven end to end with egress default-deny --
+# same "prove it in one environment first" pattern as the OTel/backend block below. staging/prod
+# are untouched (networkPolicy.egress.enabled stays false there, values.yaml's default), so
+# their egress stays exactly as unrestricted as it always was, zero risk, until this is
+# confirmed on the target machine and deliberately cherry-picked over.
+networkPolicy:
+  egress:
+    enabled: true
+
 # Phase 9/11. Only dev turns these on in this delivery — same "prove it in one environment first"
 # pattern Phase 5 itself used before staging/prod existed. Turning the OTel flags on here is only
 # safe AFTER deploy/platform/observability/ has been installed (see values.yaml's comments on
@@ -26,10 +35,13 @@ config:
   # model name Ollama reports back on GET /v1/models, which OpenAICompatBackend.check_ready() now
   # verifies is actually loaded before GET /readyz reports ready (see that class's docstring).
   # ollama.model-serving.svc.cluster.local is the DNS name deploy/platform/model-serving/
-  # service.yaml creates; no NetworkPolicy change was needed on this side (ai-service's own
-  # NetworkPolicy only restricts *ingress*, so its existing, unrestricted egress already reaches
-  # the model-serving namespace — model-serving's own NetworkPolicy is what actually restricts
-  # this, by only allowing ingress from polaris-dev).
+  # service.yaml creates. Through Phase 14, no NetworkPolicy change was needed on this side
+  # (ai-service's own NetworkPolicy only ever restricted *ingress*, so its unrestricted egress
+  # reached the model-serving namespace unconditionally) -- model-serving's own NetworkPolicy
+  # was the only thing actually restricting this, by allowing ingress from polaris-dev alone.
+  # Phase 15 (ADR-34, networkPolicy.egress.enabled below) adds an explicit egress allow-rule for
+  # this same destination/port on ai-service's own side too, so this now holds for two
+  # independent reasons instead of one.
   POLARIS_BACKEND: "openai_compat"
   POLARIS_OPENAI_BASE_URL: "http://ollama.model-serving.svc.cluster.local:11434/v1"
   POLARIS_OPENAI_MODEL: "llama3.2:1b-instruct-q4_K_M"
@@ -78,3 +90,16 @@ gateway:
   # deploy/platform/gateway/api-keys.dev.example.json for the format). Left at the chart's own
   # "{}" default here deliberately -- a real tenant/key map does not belong in a committed
   # values file even for a local-only demo (see ADR-30).
+
+# Phase 15 / ADR-33: NOT turned on yet, deliberately. Flipping this on is a two-step, real,
+# target-machine action -- not a sandbox edit -- so it is left as instructions here rather than
+# live YAML until both steps have actually been done against Darya's own cluster:
+#   1. make sealed-secrets-install   (installs the controller into its own namespace)
+#   2. make gateway-seal ENV=dev     (runs scripts/deploy/seal-gateway-secret.sh against that
+#                                      real controller; prints a ciphertext)
+# Only then, uncomment and fill in both lines below with that script's real output (never a
+# value typed from guesswork -- a wrong ciphertext fails closed at the controller, not subtly):
+# sealedSecrets:
+#   enabled: true
+# gateway:
+#   apiKeysSealed: "<paste scripts/deploy/seal-gateway-secret.sh's real output here>"

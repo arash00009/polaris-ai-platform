@@ -89,11 +89,34 @@ gateway_enabled_for() {
   awk '/^gateway:/{f=1; next} f && /^[a-z]/{f=0} f && /enabled:/{print $2; exit}' "$CHART_DIR/values-$1.yaml"
 }
 
-# Phase 12: the real api_key->tenant_id JSON for $1's gateway Secret, read from a local,
-# gitignored file (never committed -- see templates/gateway-secret.yaml's own comment). Prints
-# "{}" (every request 401s) and a loud warning, rather than failing the whole deploy, when the
-# file does not exist yet -- a fresh checkout must be able to run `make helm-apply-dev` at all
-# before anyone has provisioned a single tenant key.
+# Phase 15 / ADR-33: same awk-block-scan shape as gateway_enabled_for() above, deliberately
+# duplicated rather than parameterising one function for both (ADR-22's own reasoning) -- a
+# `sealedSecrets:` block, not `gateway:`. Prints "true" only once values-<env>.yaml's own
+# commented-out block (see that file's Phase 15 comment) has actually been uncommented with a
+# real ciphertext -- never true from this sandbox's own edits, since nothing here uncommented it.
+sealed_secrets_enabled_for() {
+  awk '/^sealedSecrets:/{f=1; next} f && /^[a-z]/{f=0} f && /enabled:/{print $2; exit}' "$CHART_DIR/values-$1.yaml"
+}
+
+# Phase 12: the PATH to the real api_key->tenant_id JSON for $1's gateway Secret, read from a
+# local, gitignored file (never committed -- see templates/gateway-secret.yaml's own comment).
+#
+# Returns a path, not content: the caller passes it to `helm --set-file`, which is the one
+# `--set*` form that takes a file's bytes verbatim without running them through Helm's strvals
+# mini-language (which treats unescaped '{', '}', '"', ':', ',' and newlines -- i.e. the whole
+# shape of a JSON object -- as its OWN syntax). An earlier version of this function printed the
+# file's *content* for `--set-string "gateway.apiKeysJson=$(...)"` to consume; that round-tripped
+# a raw JSON object through strvals and silently corrupted it (observed on a real cluster:
+# {"sk-...": "demo"} came out the other end as the string '["sk-...": "demo"]' -- valid-looking
+# but not valid JSON, which is exactly why config.py's own validator exists and caught it, 4
+# layers downstream, as a CrashLoopBackOff rather than a silent bad deploy). --set-file sidesteps
+# the mini-language entirely because the VALUE never passes through the command-line parser as
+# text -- only the path does.
+#
+# Prints the path to a generated "{}" fallback file (every request 401s), with a loud warning,
+# rather than failing the whole deploy, when the real file does not exist yet -- a fresh checkout
+# must be able to run `make helm-apply-dev` at all before anyone has provisioned a single tenant
+# key.
 gateway_api_keys_json_for() {
   local file="$GATEWAY_KEYS_DIR/api-keys.$1.local.json"
   if [[ -f "$file" ]]; then
@@ -187,17 +210,36 @@ cmd_apply() {
   # Phase 12: the gateway image and its real API-key map are only needed for an environment
   # that actually turns gateway.enabled on (dev today) -- staging/prod's `make helm-apply-*`
   # stays exactly as it was before this phase, with no new prerequisite.
+  #
+  # Phase 15 / ADR-33: the --set-file below is skipped once sealedSecrets.enabled is true for
+  # this environment. It is not merely redundant at that point -- values-<env>.yaml's own
+  # gateway.apiKeysSealed ciphertext is what templates/gateway-sealedsecret.yaml now renders,
+  # templates/gateway-secret.yaml's plain Secret stops rendering entirely (its own guard), and
+  # --set-file would still READ api-keys.$env.local.json off disk for a value nothing consumes
+  # -- harmless, but a needless read of a real tenant/key map for a code path that has become
+  # dead, which is itself worth not doing.
   local -a gateway_args=()
   if [[ "$(gateway_enabled_for "$env")" == "true" ]]; then
     need_pushed_gateway
     gateway_args=(
       --set "gateway.image.repository=$GATEWAY_CLUSTER_REPO"
       --set "gateway.image.tag=$GATEWAY_TAG"
-      --set-file "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")"
     )
+    if [[ "$(sealed_secrets_enabled_for "$env")" != "true" ]]; then
+      gateway_args+=(--set-file "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")")
+    fi
   fi
 
   log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG)"
+  # --force-conflicts: helm v4's default server-side apply otherwise fails outright whenever a
+  # field (the image tag here; the gateway's checksum/secret annotation too) is already owned by
+  # another field manager -- in dev that's "argocd-controller", since Phase 8 put polaris-dev
+  # under Argo CD management. This project's own deploy model computes image.tag locally from the
+  # git revision and has never committed it to Git (the same kind of deliberate GitOps bypass
+  # ADR-30 named for the gateway Secret), so helm and Argo CD will always disagree about this one
+  # field's value. --force-conflicts tells helm to just take ownership and win, every time, which
+  # is correct here: this command's own value is the one meant to apply. Found for real on the
+  # target machine, 2026-10-14 -- see docs/troubleshooting.md's Phase 15 section.
   hctl upgrade --install "$rel" "$CHART_DIR" \
     -f "$CHART_DIR/values-$env.yaml" \
     --set "image.repository=$CLUSTER_REPO" \

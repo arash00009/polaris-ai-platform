@@ -47,12 +47,16 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # k3d/kubectl/helm; one is added back so every pin in versions.env can be compared the same way.
 tool_version() {
   case "$1" in
-    gitleaks|actionlint)
+    gitleaks|actionlint|kubeseal)
       local raw
       raw="$(
         case "$1" in
           gitleaks)   gitleaks version 2>/dev/null ;;
           actionlint) actionlint -version 2>/dev/null | head -n1 ;;
+          # Phase 15: "kubeseal version: 0.40.0" on stdout — no "v" prefix on the number itself,
+          # unlike gitleaks/actionlint's own output, which is why this needs its own case rather
+          # than falling into the shared command below.
+          kubeseal)   kubeseal --version 2>/dev/null ;;
         esac
       )"
       [[ -n "$raw" ]] || return 0

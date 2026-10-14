@@ -1430,12 +1430,12 @@ else
 fi
 
 # 119. README.md / ADR / component-qa / docs/multitenancy.md all gained a Phase 14 section --
-# same pattern as check 112's Phase 13 equivalent. docs/troubleshooting.md is deliberately NOT
-# checked here: unlike every earlier phase at this point in the static-check file's own history,
-# this phase has not yet had its first real run on the target machine, so there is nothing real
-# to put in that file yet -- adding that check now would either be vacuous or force a fabricated
-# entry, the opposite of this project's own "verify, don't guess" discipline. It belongs here
-# once docs/multitenancy.md's own "not yet confirmed" note is replaced with a real result.
+# same pattern as check 112's Phase 13 equivalent. docs/troubleshooting.md WAS deliberately left
+# unchecked here while Phase 14 had not yet had its first real target-machine run -- it has
+# since (acme (42) > demo (23) > globex (9), three real bugs found and fixed for real), so this
+# now checks it too, same as every other phase at this point in the file's own history. Leaving
+# the old comment's reasoning in place above this update, rather than deleting it, is deliberate
+# -- it is still correct about why the check was absent earlier, just no longer about today.
 if grep -E '^\| 14 \|' README.md | grep -qv 'Planned'; then
   ok "README.md Phase 14 status row has moved on from 'Planned'"
 else
@@ -1446,15 +1446,168 @@ if grep -q 'ADR-32' docs/adr/README.md 2>/dev/null; then
 else
   bad "docs/adr/README.md is missing ADR-32 (multi-tenancy decisions)"
 fi
-if grep -qi 'phase 14' docs/component-qa.md 2>/dev/null; then
-  ok "docs/component-qa.md has a Phase 14 section"
-else
-  bad "docs/component-qa.md is missing a Phase 14 section"
-fi
+for f in docs/troubleshooting.md docs/component-qa.md; do
+  if grep -qi 'phase 14' "$f" 2>/dev/null; then
+    ok "$f has a Phase 14 section"
+  else
+    bad "$f is missing a Phase 14 section"
+  fi
+done
 if [[ -f docs/multitenancy.md ]]; then
   ok "docs/multitenancy.md exists"
 else
   bad "docs/multitenancy.md is missing"
+fi
+
+# --- Phase 15: Security / supply chain (Sealed Secrets, egress NetworkPolicy) ------------------
+# Session 1 of this phase (ADR-33 Sealed Secrets, ADR-34 egress NetworkPolicy) -- Cosign signing
+# and the Kyverno admission policy are this phase's remaining scope and have no checks yet; they
+# get their own block here once that session's own files exist.
+
+# 120. the sealed-secrets controller's platform files exist and parse as valid YAML
+SS_DIR="deploy/platform/sealed-secrets"
+if [[ -f "$SS_DIR/namespace.yaml" && -f "$SS_DIR/sealed-secrets-values.yaml" ]]; then
+  ok "exists: $SS_DIR/namespace.yaml and sealed-secrets-values.yaml"
+else
+  bad "$SS_DIR is missing namespace.yaml or sealed-secrets-values.yaml"
+fi
+if have python3; then
+  for f in "$SS_DIR/namespace.yaml" "$SS_DIR/sealed-secrets-values.yaml"; do
+    if python3 -c "
+import yaml
+list(yaml.safe_load_all(open('$f')))
+" 2>/dev/null; then
+      ok "$f parses as valid YAML"
+    else
+      bad "$f does not parse as valid YAML"
+    fi
+  done
+fi
+if grep -q 'enforce: baseline' "$SS_DIR/namespace.yaml" 2>/dev/null; then
+  ok "$SS_DIR/namespace.yaml enforces Pod Security 'baseline'"
+else
+  bad "$SS_DIR/namespace.yaml does not enforce Pod Security 'baseline'"
+fi
+if grep -q 'namespacedRoles: true' "$SS_DIR/sealed-secrets-values.yaml" 2>/dev/null \
+  && grep -q 'clusterRole: false' "$SS_DIR/sealed-secrets-values.yaml" 2>/dev/null; then
+  ok "$SS_DIR/sealed-secrets-values.yaml scopes the controller to namespaced RBAC, not its cluster-wide default"
+else
+  bad "$SS_DIR/sealed-secrets-values.yaml is missing rbac.namespacedRoles/clusterRole (controller would default to cluster-wide secrets access)"
+fi
+
+# 121. scripts/bootstrap/sealed-secrets.sh and scripts/deploy/seal-gateway-secret.sh exist, are
+# executable, and implement their stated verb sets
+SS_SCRIPT="scripts/bootstrap/sealed-secrets.sh"
+SEAL_SCRIPT="scripts/deploy/seal-gateway-secret.sh"
+if [[ -x "$SS_SCRIPT" ]]; then
+  ok "$SS_SCRIPT exists and is executable"
+  if grep -q 'cmd_install' "$SS_SCRIPT" && grep -q 'cmd_fetch_cert' "$SS_SCRIPT" && grep -q 'cmd_uninstall' "$SS_SCRIPT"; then
+    ok "$SS_SCRIPT implements install/status/fetch-cert/uninstall"
+  else
+    bad "$SS_SCRIPT is missing one of install/status/fetch-cert/uninstall"
+  fi
+else
+  bad "$SS_SCRIPT is missing or not executable"
+fi
+if [[ -x "$SEAL_SCRIPT" ]]; then
+  ok "$SEAL_SCRIPT exists and is executable"
+  if grep -q 'kubeseal' "$SEAL_SCRIPT" && grep -q 'KEYS_FILE=' "$SEAL_SCRIPT" && grep -q 'api-keys' "$SEAL_SCRIPT"; then
+    ok "$SEAL_SCRIPT seals the real local api-keys file with kubeseal, not a fabricated one"
+  else
+    bad "$SEAL_SCRIPT does not reference both kubeseal and the real local api-keys file"
+  fi
+else
+  bad "$SEAL_SCRIPT is missing or not executable"
+fi
+
+# 122. the chart's SealedSecret/plain-Secret paths are mutually exclusive, and off by default
+if grep -q 'and .Values.gateway.enabled (not .Values.sealedSecrets.enabled)' helm/ai-platform/templates/gateway-secret.yaml; then
+  ok "gateway-secret.yaml only renders when sealedSecrets.enabled is false"
+else
+  bad "gateway-secret.yaml is missing its sealedSecrets.enabled guard (could double-render alongside gateway-sealedsecret.yaml)"
+fi
+if [[ -f helm/ai-platform/templates/gateway-sealedsecret.yaml ]] \
+  && grep -q 'and .Values.gateway.enabled .Values.sealedSecrets.enabled' helm/ai-platform/templates/gateway-sealedsecret.yaml \
+  && grep -q 'kind: SealedSecret' helm/ai-platform/templates/gateway-sealedsecret.yaml; then
+  ok "gateway-sealedsecret.yaml exists and renders a SealedSecret only when both gateway and sealedSecrets are enabled"
+else
+  bad "gateway-sealedsecret.yaml is missing, or missing its guard, or not a SealedSecret"
+fi
+if grep -A2 '^sealedSecrets:' helm/ai-platform/values.yaml | grep -q 'enabled: false'; then
+  ok "values.yaml defaults sealedSecrets.enabled to false"
+else
+  bad "values.yaml does not default sealedSecrets.enabled to false"
+fi
+
+# 123. egress NetworkPolicy: off by default, on in dev, with the expected allow-list destinations
+if grep -A2 '^  egress:' helm/ai-platform/values.yaml | grep -q 'enabled: false'; then
+  ok "values.yaml defaults networkPolicy.egress.enabled to false"
+else
+  bad "values.yaml does not default networkPolicy.egress.enabled to false"
+fi
+if grep -q 'networkPolicy:' helm/ai-platform/values-dev.yaml && grep -A2 'networkPolicy:' helm/ai-platform/values-dev.yaml | grep -q 'enabled: true'; then
+  ok "values-dev.yaml turns networkPolicy.egress.enabled on"
+else
+  bad "values-dev.yaml does not turn networkPolicy.egress.enabled on"
+fi
+if grep -q 'ai-service-allow-egress' helm/ai-platform/templates/networkpolicy.yaml \
+  && grep -q 'egress.modelServingNamespace' helm/ai-platform/templates/networkpolicy.yaml \
+  && grep -q 'egress.observabilityNamespace' helm/ai-platform/templates/networkpolicy.yaml; then
+  ok "networkpolicy.yaml defines ai-service-allow-egress with model-serving and observability destinations"
+else
+  bad "networkpolicy.yaml is missing ai-service-allow-egress or one of its expected destinations"
+fi
+if grep -q 'ai-gateway-allow-egress' helm/ai-platform/templates/gateway-networkpolicy.yaml; then
+  ok "gateway-networkpolicy.yaml defines ai-gateway-allow-egress"
+else
+  bad "gateway-networkpolicy.yaml is missing ai-gateway-allow-egress"
+fi
+
+# 124. versions.env: kubeseal pinned with a sandbox-computed (not published-checksums-file)
+# digest for both architectures this project supports
+if grep -q '^KUBESEAL_VERSION=' versions.env && grep -q '^KUBESEAL_SHA256_AMD64=' versions.env && grep -q '^KUBESEAL_SHA256_ARM64=' versions.env; then
+  ok "versions.env pins KUBESEAL_VERSION and both architectures' checksums"
+else
+  bad "versions.env is missing KUBESEAL_VERSION or one of KUBESEAL_SHA256_AMD64/ARM64"
+fi
+if grep -q 'install_kubeseal' scripts/bootstrap/install-tools.sh && grep -q 'kubeseal)' scripts/lib/common.sh; then
+  ok "install-tools.sh and common.sh's tool_version() both know about kubeseal"
+else
+  bad "install-tools.sh or common.sh's tool_version() is missing kubeseal support"
+fi
+
+# 125. Makefile: the five new Phase 15 targets exist
+for target in sealed-secrets-install sealed-secrets-status sealed-secrets-fetch-cert sealed-secrets-uninstall gateway-seal; do
+  if grep -qE "^${target}:" Makefile; then
+    ok "Makefile target: $target"
+  else
+    bad "Makefile is missing target: $target"
+  fi
+done
+
+# 126. README.md / ADR / docs/security/*.md all gained Phase 15 material. docs/troubleshooting.md
+# is deliberately NOT checked here yet, same reasoning check 119's own comment gives for why it
+# was once absent for Phase 14: this phase has not yet had its first real target-machine run, so
+# there is nothing real to put there yet.
+if grep -E '^\| 15 \|' README.md | grep -qv 'Planned'; then
+  ok "README.md Phase 15 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 15 status row still says Planned (or the row is missing/reworded)"
+fi
+if grep -q 'ADR-33' docs/adr/README.md 2>/dev/null && grep -q 'ADR-34' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-33 and ADR-34"
+else
+  bad "docs/adr/README.md is missing ADR-33 (Sealed Secrets) or ADR-34 (egress NetworkPolicy)"
+fi
+if grep -qi 'phase 15' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 15 section"
+else
+  bad "docs/component-qa.md is missing a Phase 15 section"
+fi
+if [[ -f docs/security/secrets-management.md && -f docs/security/network-policy.md ]]; then
+  ok "docs/security/secrets-management.md and docs/security/network-policy.md both exist"
+else
+  bad "docs/security/ is missing secrets-management.md or network-policy.md"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"

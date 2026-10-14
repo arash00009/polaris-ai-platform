@@ -1,0 +1,25 @@
+# deploy/platform/sealed-secrets/namespace.yaml — Phase 15 / ADR-33.
+#
+# A dedicated namespace, not kube-system (the controller's own upstream chart default) or
+# bundled into an existing one -- same reasoning as observability/model-serving each getting
+# their own namespace (deploy/platform/observability/namespace.yaml, .../model-serving/
+# namespace.yaml): one clearly-owned namespace per platform component, never shared, so RBAC,
+# NetworkPolicy and `kubectl -n <ns>` all stay unambiguous about what belongs to this phase.
+#
+# pod-security.kubernetes.io/enforce: baseline, not restricted -- same "not verified against
+# this specific upstream chart's own securityContext yet" reasoning as observability's and
+# model-serving's namespace.yaml. The sealed-secrets controller is a small, well-behaved
+# single-container Go binary that is commonly reported to run fine under "restricted" elsewhere,
+# but "commonly reported elsewhere" is not this project's own target-machine verification --
+# tightening this once scripts/bootstrap/sealed-secrets.sh's `install` has actually been run
+# for real is a named follow-up, not assumed here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sealed-secrets
+  labels:
+    app.kubernetes.io/part-of: polaris
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

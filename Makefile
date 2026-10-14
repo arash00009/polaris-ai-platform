@@ -39,7 +39,7 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
 
-tools-install: ## Install pinned k3d, kubectl, helm, gitleaks and actionlint into ~/.local/bin (no sudo). Add ARGS="--only gitleaks" etc. to install just one
+tools-install: ## Install pinned k3d, kubectl, helm, gitleaks, actionlint and kubeseal into ~/.local/bin (no sudo). Add ARGS="--only gitleaks" etc. to install just one
 	./scripts/bootstrap/install-tools.sh $(ARGS)
 
 doctor: ## Check that this machine can run the platform
@@ -366,3 +366,25 @@ finops-uninstall: ## Remove OpenCost (the Prometheus counters it read from are u
 
 tenants-smoke: ## Prove demo/acme/globex get three real, ordered rate-limit tiers from the dev release (needs: make helm-apply-dev, real tenant keys provisioned)
 	./scripts/verify/tenant-tiers.sh dev
+
+# --- Phase 15: Security / supply chain (ADR-33 Sealed Secrets, ADR-34 egress NetworkPolicy) -----
+# Its own 'sealed-secrets' namespace, same pattern as obs-*/model-serving-*/finops-* above.
+# Egress hardening itself (ADR-34) needs no new install -- it is already part of
+# helm-apply-<env> via helm/ai-platform/templates/networkpolicy.yaml and
+# gateway-networkpolicy.yaml, gated by values-dev.yaml's networkPolicy.egress.enabled. See
+# docs/security/secrets-management.md and docs/security/network-policy.md.
+
+sealed-secrets-install: ## Install the sealed-secrets controller into the sealed-secrets namespace (needs: make cluster-up)
+	./scripts/bootstrap/sealed-secrets.sh install
+
+sealed-secrets-status: ## Show the sealed-secrets controller's Helm release, pods, and every SealedSecret in polaris-dev/-staging/-prod
+	./scripts/bootstrap/sealed-secrets.sh status
+
+sealed-secrets-fetch-cert: ## Print the controller's current public cert (PEM) to stdout
+	./scripts/bootstrap/sealed-secrets.sh fetch-cert
+
+sealed-secrets-uninstall: ## Remove the sealed-secrets controller (any already-applied SealedSecret becomes undecryptable -- see the script's own warning)
+	./scripts/bootstrap/sealed-secrets.sh uninstall
+
+gateway-seal: ## Seal deploy/platform/gateway/api-keys.$(ENV).local.json against the real controller and print the ciphertext to paste into values-$(ENV).yaml (needs: make sealed-secrets-install; set ENV=dev|staging|prod)
+	./scripts/deploy/seal-gateway-secret.sh $(or $(ENV),dev)

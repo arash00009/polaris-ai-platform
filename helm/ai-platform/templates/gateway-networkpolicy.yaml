@@ -4,6 +4,11 @@
 # ai-gateway's included), so a second one here would be redundant, not additively stricter.
 # Once gateway.enabled is true, that same file's "ai-service-allow-ingress" rule is narrowed
 # (see that file's own comment) so Traefik reaches ai-service only through here, never directly.
+#
+# Phase 15 / ADR-34: the same reasoning extends to egress -- "ai-service-default-deny" also
+# denies egress for every pod in the namespace (gateway's included) once
+# networkPolicy.egress.enabled is true, so the second object below only needs to add back what
+# ai-gateway itself originates: DNS, ai-service (its one upstream), and the OTel Collector.
 {{- if and .Values.gateway.enabled .Values.networkPolicy.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -32,4 +37,51 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.networkPolicy.allowPort }}
+{{- if .Values.networkPolicy.egress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-gateway-allow-egress
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.gatewayLabels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "ai-platform.gatewaySelectorLabels" . | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.dnsNamespace }}
+      ports:
+        - protocol: UDP
+          port: {{ .Values.networkPolicy.egress.dnsPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.dnsPort }}
+    # ai-service, this gateway's one upstream (gateway/main.py's own proxy path) -- same-namespace pod
+    # selector, same as the ingress object above's own "from" pattern, not a namespaceSelector,
+    # since both Deployments live in the same namespace.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "ai-platform.selectorLabels" . | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.allowPort }}
+    # OTel Collector -- only actually used when config.GATEWAY_OTEL_ENABLED=true (see
+    # templates/networkpolicy.yaml's own egress object for why an unused allow-rule is a
+    # harmless no-op, not a widened surface, when that flag is off).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.egress.observabilityNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.otlpGrpcPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.otlpHttpPort }}
+{{- end }}
 {{- end }}

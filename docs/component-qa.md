@@ -356,12 +356,16 @@ Status: **written and unit-tested in the sandbox only, 2026-10-05 — not yet ru
 
 ## Phase 13
 
-Status: **built and unit-tested in the sandbox only, 2026-10-07 — not yet run against a real
-cluster.** `app/ai_service`'s suite grew from 151 to 159 tests (99.21 % coverage), `app/gateway`'s
-from 43 to 51 (96.07 % coverage), both still above the 95 % gate, both confirmed with `make
-app-check`/`make gateway-check`. OpenCost's Helm install and the dashboard it feeds have not run
-against a real cluster — no cluster or `helm` binary exists in this sandbox. Full record:
-`docs/finops.md`, ADR-31, `docs/troubleshooting.md`.
+Status: **confirmed on the target machine, 2026-10-08.** `app/ai_service`'s suite grew from 151 to
+159 tests (99.21 % coverage), `app/gateway`'s from 43 to 51 (96.07 % coverage), both still above
+the 95 % gate, both confirmed with `make app-check`/`make gateway-check`. OpenCost's Helm install
+ran for real on Darya (`opencost-2.5.32`, now pinned), and both infrastructure gaps named in the
+sandbox delivery were checked for real rather than assumed — the Prometheus Service name held up,
+and the ServiceMonitor question needed and got a real config fix
+(`opencost.metrics.serviceMonitor.enabled`), now confirmed live: `node_cpu_hourly_cost` and
+`container_cpu_allocation` are real series in Prometheus. Only the Grafana dashboard's own
+visual rendering against real traffic is still unconfirmed. Full record: `docs/finops.md`,
+ADR-31, `docs/troubleshooting.md`.
 
 ### Tenant-attribution counters (`ai_service/telemetry.py`'s `FinOpsMetrics`, `gateway/telemetry.py`'s `ai_gateway_requests_total`)
 
@@ -387,12 +391,13 @@ against a real cluster — no cluster or `helm` binary exists in this sandbox. F
 
 ## Phase 14
 
-Status: **written and verified in the sandbox, 2026-10-13 — not yet confirmed on the target
-machine.** `app/gateway`'s suite grew from 51 to 64 tests (96.51 % coverage, up from 96.07 %,
-`ruff check`/`ruff format --check` clean, `make gateway-check` confirmed with margin above the
-95 % gate). This phase's first real run — provisioning the real `acme`/`globex` tenant keys and
-running the new `make tenants-smoke` against Darya — has not happened yet. Full record:
-`docs/multitenancy.md`, ADR-32.
+Status: **done, confirmed on the target machine, 2026-10-13.** `app/gateway`'s suite grew from
+51 to 64 tests (96.51 % coverage, up from 96.07 %, `ruff check`/`ruff format --check` clean,
+`make gateway-check` confirmed with margin above the 95 % gate). `make tenants-smoke` produced a
+real, trustworthy result against the live gateway (`acme (42) > demo (23) > globex (9)`,
+matching the configured tiers exactly) after three real target-machine bugs were found and
+fixed along the way — full record: `docs/multitenancy.md`, ADR-32, `docs/troubleshooting.md`'s
+Phase 14 section.
 
 ### Per-tenant configured rate limit/quota (`gateway/ratelimit.py`'s `TenantLimits`, `gateway/config.py`'s `GATEWAY_TENANT_LIMITS_JSON` validator)
 
@@ -415,3 +420,33 @@ running the new `make tenants-smoke` against Darya — has not happened yet. Ful
 | 4. Scale | Adding a fourth tenant tier is a config-only change (one more key in `GATEWAY_TENANT_LIMITS_JSON` and `api-keys.dev.local.json`), no code change — but the mechanism itself does not scale to needing per-tenant compute guarantees, which only a real namespace/`ResourceQuota` split would provide. |
 | 5. Security | Logical tenancy means a bug in the gateway's own tenant-resolution code (API key → tenant id, unchanged since Phase 12) is the only thing standing between tenants — there is no second, Kubernetes-level backstop. This is an accepted trade-off for a demonstration project, named rather than glossed over. |
 | 6. Cloud | A real deployment needing hard isolation would move to namespace-per-tenant (or cluster-per-tenant for the strongest guarantee), each with its own `ResourceQuota`/`NetworkPolicy`, and would likely replace the in-memory rate limiter with a shared Redis-backed one at the same time — both already named, neither built, consistent with this project's "name the production path, don't fake it" discipline used throughout (Sealed Secrets, a real secret manager, a GPU-backed model server). |
+
+## Phase 15
+
+Status: **in progress — session 1 (Sealed Secrets + egress NetworkPolicy) written and
+static-tested in the sandbox, 2026-10-13, not yet confirmed on the target machine.** Image
+signing (Cosign) and an admission policy enforcing it (Kyverno) are this phase's remaining
+scope, not yet started. Full record: `docs/security/secrets-management.md`,
+`docs/security/network-policy.md`, ADR-33, ADR-34.
+
+### Sealed Secrets controller, closing the GitOps-bypass gap ADR-30 confirmed for real
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Phase 12's gateway API-key `Secret` had to be applied directly with `helm upgrade`, bypassing GitOps, because committing its plaintext to `polaris-gitops` was never an option. ADR-30 then confirmed, against the real cluster, exactly why that bypass was costly: an `ignoreDifferences` entry — correctly configured, checked twice — still did not stop `selfHeal` from reverting the real Secret back to the chart's placeholder. |
+| 2. Why | Sealed Secrets, not External Secrets Operator or Vault — it needs no external secret-store backend, the one property this project's "no paid cloud, no extra backend" constraint actually requires. A `SealedSecret`'s ciphertext is safe to commit and safe to let `selfHeal` revert to, because that committed state is now itself correct, not a placeholder masking something real. |
+| 3. Failure | A wrong ciphertext (sealed against the wrong controller, or for the wrong target namespace — kubeseal's default "strict" scope ties ciphertext to one namespace/name) fails closed: the controller cannot decrypt it, no Secret materialises, and every gateway request 401s — loud and immediate, not a silent bad deploy. The controller's own private key is the single point of trust the whole scheme rests on; losing it (e.g. an unplanned namespace deletion) makes every previously-sealed secret permanently undecryptable, named plainly in `scripts/bootstrap/sealed-secrets.sh`'s own `uninstall` warning. |
+| 4. Scale | A second real Secret anywhere else in this project would follow the exact same `seal-gateway-secret.sh`-shaped script, parameterised by name/namespace — the mechanism does not get more complex with more secrets, only more invocations of an already-working one. |
+| 5. Security | Least-privilege RBAC (`rbac.namespacedRoles: true`, confirmed by reading the chart's own templates rather than trusting its name) scopes the controller to exactly `polaris-dev`/`-staging`/`-prod`, not the chart's own cluster-wide default. The controller's own namespace is Pod Security `baseline`, not yet `restricted`, pending a real target-machine confirmation that this specific upstream image starts cleanly under it. |
+| 6. Cloud | External Secrets Operator or Vault is the named production equivalent (`docs/architecture.md` section 14) — both keep the actual secret material in an external store rather than inside the cluster's own controller, a real difference from Sealed Secrets this project documents rather than builds. |
+
+### Egress NetworkPolicy default-deny for `ai-service`/`ai-gateway`
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Every `NetworkPolicy` in this project, Phase 5 through Phase 14, only ever restricted *ingress* — egress was completely unrestricted the whole time, named plainly in `values.yaml`'s own comment rather than left implicit. A compromised `ai-service`/`ai-gateway` pod could reach anywhere outbound. |
+| 2. Why | Extend the existing default-deny objects' `policyTypes` to also cover `Egress` (Kubernetes NetworkPolicies selecting the same pods are additive, the same pattern this project's own ingress rules already use), then add back exactly four named destinations per Deployment — never one combined "allow everything these two need" rule, so a future new egress need is a reviewable one-line addition. |
+| 3. Failure | A mistake here fails loudly: `make verify-dev`'s own `ai-answer` check and `make tenants-smoke` both exercise every one of the four allowed destinations under real load, so a wrongly-blocked rule shows up immediately as a failing chat request, not a silent gap. |
+| 4. Scale | Zero marginal cost per request — `NetworkPolicy` is enforced by the CNI's own datapath, not application code; adding a destination later is a one-line values/template change, not a new mechanism. |
+| 5. Security | Meaningfully reduces blast radius from a compromised pod — DNS, one upstream, and the telemetry pipeline are the *only* places either service can originate a connection to, where previously it was unrestricted. `model-serving`'s own egress is a named, deliberately deferred gap (its needs span pull-time, not a small enumerable allow-list) — not forgotten, not silently assumed safe. |
+| 6. Cloud | The same NetworkPolicy API this project already uses is what a managed Kubernetes cluster (EKS/AKS/GKE) also enforces, typically via a CNI plugin chosen specifically for NetworkPolicy support (Calico, Cilium) rather than k3s's bundled kube-router module — the mechanism carries over directly, only the enforcement implementation changes. |

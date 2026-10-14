@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # scripts/bootstrap/install-tools.sh
-# Install pinned versions of k3d, kubectl, helm, gitleaks and actionlint without sudo.
-# Every download is verified against the checksum the project publishes.
+# Install pinned versions of k3d, kubectl, helm, gitleaks, actionlint and kubeseal without sudo.
+# Every download is verified against the checksum the project publishes (kubeseal: see its own
+# function below and versions.env's Phase 15 comment for why that is a sandbox-computed checksum
+# rather than a published checksums.txt).
 #
 # gitleaks and actionlint (Phase 6) are local-dev conveniences too — the CI workflow installs
 # its own copies the same way, in the runner, since a GitHub-hosted runner starts from nothing
 # every time. This script is the one place both paths share the version pins and the download
-# logic, so a version bump here is a version bump everywhere.
+# logic, so a version bump here is a version bump everywhere. kubeseal (Phase 15) is local-dev/
+# target-machine only — nothing in CI seals a secret, so the workflow never needs its own copy.
 #
-# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm|gitleaks|actionlint] [--force]
+# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm|gitleaks|actionlint|kubeseal] [--force]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,7 +28,7 @@ usage() {
 Usage: $(basename "$0") [--prefix DIR] [--only k3d|kubectl|helm] [--force]
 
   --prefix DIR   install directory (default: \$HOME/.local/bin)
-  --only TOOL    install just one tool (k3d, kubectl, helm, gitleaks, actionlint)
+  --only TOOL    install just one tool (k3d, kubectl, helm, gitleaks, actionlint, kubeseal)
   --force        reinstall even if the pinned version is already present
 
 Pinned versions come from versions.env.
@@ -164,9 +167,32 @@ install_actionlint() {
   log_ok "actionlint installed to $PREFIX/actionlint"
 }
 
+# kubeseal (Phase 15): unlike every tool above, this release publishes no discoverable
+# checksums.txt asset (versions.env's Phase 15 comment records exactly which filenames were
+# checked and 404'd), so the expected digest is a sandbox-computed, per-arch constant instead of
+# a value parsed out of a downloaded checksums file.
+install_kubeseal() {
+  needs_install kubeseal "$KUBESEAL_VERSION" || return 0
+  local ver="${KUBESEAL_VERSION#v}"
+  local base="https://github.com/bitnami-labs/sealed-secrets/releases/download/${KUBESEAL_VERSION}"
+  local asset="kubeseal-${ver}-linux-${ARCH}.tar.gz"
+  local expected
+  case "$ARCH" in
+    amd64) expected="$KUBESEAL_SHA256_AMD64" ;;
+    arm64) expected="$KUBESEAL_SHA256_ARM64" ;;
+    *) die "No pinned kubeseal checksum for architecture '$ARCH'" ;;
+  esac
+  log_info "Installing kubeseal ${KUBESEAL_VERSION} (${ARCH})"
+  download "$base/$asset" "$TMP/$asset"
+  verify_sha256 "$TMP/$asset" "$expected"
+  tar -xzf "$TMP/$asset" -C "$TMP" kubeseal
+  install -m 0755 "$TMP/kubeseal" "$PREFIX/kubeseal"
+  log_ok "kubeseal installed to $PREFIX/kubeseal"
+}
+
 case "$ONLY" in
-  ""|k3d|kubectl|helm|gitleaks|actionlint) ;;
-  *) die "--only must be one of: k3d, kubectl, helm, gitleaks, actionlint" ;;
+  ""|k3d|kubectl|helm|gitleaks|actionlint|kubeseal) ;;
+  *) die "--only must be one of: k3d, kubectl, helm, gitleaks, actionlint, kubeseal" ;;
 esac
 
 install_k3d
@@ -174,6 +200,7 @@ install_kubectl
 install_helm
 install_gitleaks
 install_actionlint
+install_kubeseal
 
 if [[ ":$ORIGINAL_PATH:" != *":$PREFIX:"* ]]; then
   log_warn "$PREFIX is not on your PATH. Add it permanently with:"

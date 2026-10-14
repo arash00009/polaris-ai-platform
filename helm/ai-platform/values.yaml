@@ -93,10 +93,35 @@ networkPolicy:
   allowFromNamespace: kube-system
   allowPort: 8000
   # Phase 9: a second ingress rule (additive to allowFromNamespace above) so Prometheus, running
-  # in the observability namespace, can scrape GET /metrics. The Deployment's egress is already
-  # unrestricted (templates/networkpolicy.yaml only sets policyTypes: ["Ingress"]), so nothing
-  # extra is needed for the app to push traces/logs out to the OTel Collector in that namespace.
+  # in the observability namespace, can scrape GET /metrics. Egress was unrestricted here through
+  # Phase 14 (policyTypes only ever listed "Ingress") -- Phase 15 (ADR-34) closes that: egress is
+  # now also default-deny, with an explicit allow-list below.
   allowScrapeFromNamespace: observability
+  # Phase 15 / ADR-34: default-deny egress too, not only ingress. DNS (kube-dns, kube-system,
+  # UDP+TCP/53) is the one rule every workload needs regardless of what else it talks to --
+  # everything else is named per-component below rather than one shared "allow everything out"
+  # rule, so a future new egress need is a reviewable one-line addition, not a silent opt-out.
+  # enabled: false here -- same "prove it in one environment first" pattern as gateway.enabled/
+  # serviceMonitor.enabled/POLARIS_OTEL_ENABLED (only values-dev.yaml turns this on) -- not
+  # because any real risk was found for staging/prod (both run the mock backend with OTel off
+  # today, so neither actually needs any egress beyond DNS yet), but because "no real workload
+  # needs it today" is not the same claim as "confirmed not to break anything," and every
+  # similar toggle in this chart has earned that claim on the target machine before going wider.
+  egress:
+    enabled: false
+    dnsNamespace: kube-system
+    dnsPort: 53
+    # ai-service -> model-serving (Ollama, Phase 11, only reached when
+    # config.POLARIS_BACKEND=openai_compat) and ai-service -> observability (OTel Collector,
+    # Phase 9/10, only reached when config.POLARIS_OTEL_ENABLED=true). Both targets are optional
+    # per environment, so both are separate, independently-named rules below rather than one
+    # bundled together -- an environment with one on and the other off still gets exactly the
+    # egress its own config needs, nothing wider.
+    modelServingNamespace: model-serving
+    modelServingPort: 11434
+    observabilityNamespace: observability
+    otlpGrpcPort: 4317
+    otlpHttpPort: 4318
 
 # Phase 9. False at this shared-defaults level for the same reason POLARIS_OTEL_ENABLED is:
 # ServiceMonitor is a CRD installed by kube-prometheus-stack (deploy/platform/observability/),
@@ -122,6 +147,18 @@ ingress:
 
 podSecurityStandard:
   version: "v1.34"
+
+# Phase 15 / ADR-33: off by default, same "prove it in one environment first" pattern as
+# gateway.enabled/serviceMonitor.enabled/POLARIS_OTEL_ENABLED above -- true only once the
+# sealed-secrets controller is actually installed (make sealed-secrets-install) AND
+# gateway.apiKeysSealed below holds a real, freshly-sealed ciphertext for that cluster's
+# controller key (scripts/deploy/seal-gateway-secret.sh), confirmed on the target machine.
+# Flipping this true with apiKeysSealed still at its "" placeholder would render a SealedSecret
+# with empty encryptedData -- harmless at `helm template` time (no cluster to apply it against
+# in the sandbox this was written in) but wrong against a real controller, so values-dev.yaml's
+# own comment repeats this warning at the point it actually matters.
+sealedSecrets:
+  enabled: false
 
 # Phase 12: ai-gateway, a sibling Deployment/Service in front of ai-service (templates/
 # gateway-*.yaml). Off at this shared-defaults level for the same "prove it in one environment
@@ -169,8 +206,18 @@ gateway:
 
   # A placeholder only: real tenants never belong in a committed values file. Overridden by
   # `--set-file gateway.apiKeysJson=<local, gitignored file>` -- see templates/gateway-secret.yaml
-  # and deploy/platform/gateway/api-keys.dev.example.json.
+  # and deploy/platform/gateway/api-keys.dev.example.json. Only used when sealedSecrets.enabled
+  # is false (templates/gateway-secret.yaml's own guard) -- the Phase 12 path, kept as the
+  # default/fallback for any environment that has the gateway on but not Sealed Secrets.
   apiKeysJson: "{}"
+
+  # Phase 15 / ADR-33: the sealed-secrets controller's own ciphertext for
+  # GATEWAY_API_KEYS_JSON, produced by `scripts/deploy/seal-gateway-secret.sh` against a real
+  # controller and SAFE TO COMMIT as-is (that is Sealed Secrets' whole point -- only the
+  # controller's private key, which never leaves the cluster, can decrypt it). "" here is a
+  # placeholder, same as apiKeysJson's "{}" above; only read when sealedSecrets.enabled is true
+  # (templates/gateway-sealedsecret.yaml's guard).
+  apiKeysSealed: ""
 
   # Smaller than ai-service's defaults: this process does no model inference and holds only a
   # small in-memory key/rate-limit/quota table. Starting point only, not measured under load --
