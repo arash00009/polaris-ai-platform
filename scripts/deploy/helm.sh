@@ -204,6 +204,7 @@ cmd_apply() {
     --set "image.tag=$TAG" \
     "${gateway_args[@]}" \
     --namespace "$ns" --create-namespace \
+    --force-conflicts \
     --wait --timeout 120s
 
   log_ok "$rel is rolled out (image $CLUSTER_REPO:$TAG)"
