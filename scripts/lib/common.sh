@@ -47,7 +47,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # k3d/kubectl/helm; one is added back so every pin in versions.env can be compared the same way.
 tool_version() {
   case "$1" in
-    gitleaks|actionlint|kubeseal)
+    gitleaks|actionlint|kubeseal|cosign)
       local raw
       raw="$(
         case "$1" in
@@ -57,6 +57,10 @@ tool_version() {
           # unlike gitleaks/actionlint's own output, which is why this needs its own case rather
           # than falling into the shared command below.
           kubeseal)   kubeseal --version 2>/dev/null ;;
+          # Phase 15 session 2: `cosign version` prints a multi-line block including a
+          # "GitVersion:" row, also with no "v" prefix on the number itself — same shape as
+          # kubeseal, same reason it is grouped here rather than with k3d/kubectl/helm below.
+          cosign)     cosign version 2>/dev/null ;;
         esac
       )"
       [[ -n "$raw" ]] || return 0

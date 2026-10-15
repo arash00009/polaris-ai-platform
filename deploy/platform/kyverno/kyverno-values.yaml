@@ -1,0 +1,37 @@
+# deploy/platform/kyverno/kyverno-values.yaml — Phase 15 session 2 / ADR-36.
+#
+# Confirmed for real against the chart's own values.yaml (kyverno/kyverno, main branch, fetched
+# via raw.githubusercontent.com -- the same reachable host every other *.github.io-fronted
+# chart in this project has used to verify its own override keys -- 2026-10-15). Deliberately
+# minimal: only the keys this project has an actual, named reason to override. Everything else
+# (images, probes, webhooks, CRDs) stays at the chart's own default -- crds.install is already
+# true by default, so a plain `helm upgrade --install --wait` creates them in the same operation,
+# the same assumption scripts/bootstrap/kyverno.sh's own --wait timeout is sized around.
+#
+# Four separate controllers ship in this one chart (admissionController, backgroundController,
+# reportsController, cleanupController) -- only admissionController's own `verifyImages` rule
+# matters for this phase's actual scope (ADR-36), but Helm installs all four together; there is
+# no documented way to disable the other three independently without risking a chart version
+# this project has not read the templates of for that specific toggle, so all four install, at
+# minimal footprint, rather than half-guessing a way to turn three of them off.
+#
+# replicas: explicitly 1 for every controller, for a single-node k3d dev cluster -- the chart's
+# own default leaves this null and resolves it through a shared helper template this project did
+# not trace to its source (a dependency chart, not charts/kyverno/templates/_helpers.tpl itself);
+# setting it explicitly removes that ambiguity rather than relying on whatever the unset default
+# turns out to mean. Each controller's own default resource requests/limits (confirmed read
+# directly from values.yaml: 10-100m CPU / 128-384Mi memory per container, already modest) are
+# left untouched -- not measured against a real running install yet (no cluster in the sandbox
+# this was written in), the same "confirm with `kubectl top pod` after a real install, adjust in
+# a follow-up commit if the numbers disagree" two-step every other estimate in this project uses.
+admissionController:
+  replicas: 1
+
+backgroundController:
+  replicas: 1
+
+reportsController:
+  replicas: 1
+
+cleanupController:
+  replicas: 1

@@ -352,7 +352,7 @@ ghcr_owner_repo() {
 cmd_publish() {
   need_docker
   need_image
-  local owner_repo image ghcr_immutable ghcr_version
+  local owner_repo image ghcr_immutable ghcr_version push_output digest
   owner_repo="$(ghcr_owner_repo)"
   [[ -n "$owner_repo" && "$owner_repo" == */* ]] \
     || die "Could not determine the GitHub owner/repo. Set GITHUB_REPOSITORY=owner/repo, or run inside a checkout with a GitHub 'origin' remote."
@@ -363,10 +363,25 @@ cmd_publish() {
   log_info "publishing $ghcr_immutable and $ghcr_version (retagged from the local build $TAG_IMMUTABLE, not rebuilt)"
   docker tag "$TAG_IMMUTABLE" "$ghcr_immutable"
   docker tag "$TAG_VERSION" "$ghcr_version"
-  docker push "$ghcr_immutable" \
-    || die "push failed. Logged in? docker login ghcr.io -u <user> --password-stdin (needs write:packages)."
+
+  # Phase 15 session 2 / ADR-35: `docker push`'s own stdout ends with a "<tag>: digest: sha256:...
+  # size: ..." line for every push — captured here (rather than `docker inspect --format
+  # '{{index .RepoDigests 0}}'`, which depends on the local daemon's RepoDigests bookkeeping
+  # actually being populated, an assumption not worth making) so the publish job in
+  # .github/workflows/ci.yml can hand the exact digest it just pushed to `cosign sign`, never a
+  # mutable tag -- a tag can be retargeted after signing; a digest cannot.
+  push_output="$(docker push "$ghcr_immutable" 2>&1)" \
+    || { printf '%s\n' "$push_output" >&2; die "push failed. Logged in? docker login ghcr.io -u <user> --password-stdin (needs write:packages)."; }
+  printf '%s\n' "$push_output"
   docker push "$ghcr_version"
-  log_ok "published: $ghcr_immutable"
+
+  digest="$(grep -oE 'sha256:[0-9a-f]{64}' <<<"$push_output" | head -n1)"
+  [[ -n "$digest" ]] \
+    || die "Published $ghcr_immutable but could not parse its digest from docker push's own output -- cannot hand off to Cosign signing (ADR-35). Nothing was signed; the push itself succeeded."
+  log_ok "published: $ghcr_immutable (digest: $digest)"
+  # Grep-able on its own line, deliberately not mixed into a log_* call, so a CI step can do
+  # `grep '^GHCR_IMAGE_DIGEST=' | tee -a "$GITHUB_OUTPUT"` without parsing log formatting.
+  printf 'GHCR_IMAGE_DIGEST=%s@%s\n' "$image" "$digest"
 }
 
 # ---- dispatch ------------------------------------------------------------------------------

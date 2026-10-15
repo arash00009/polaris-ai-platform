@@ -1,0 +1,62 @@
+# deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl — Phase 15 session 2 /
+# ADR-36.
+#
+# A .tmpl, never applied as-is: __POLARIS_OWNER_REPO__ below is a placeholder for this
+# repository's real "owner/repo" string (e.g. "arash00009/polaris-ai-platform"), substituted by
+# scripts/bootstrap/kyverno.sh's `apply-policy` command with the exact same ghcr_owner_repo()
+# logic scripts/build/image.sh already uses to decide what it published to GHCR as (duplicated
+# deliberately, per ADR-22 — a later change to one must never alter the other's behaviour by
+# accident), then piped straight into `kubectl apply -f -` over stdin. The rendered YAML is never
+# written to a file on disk and never committed — this is a deliberate design choice made after
+# Phase 15 session 1's own real bug (values-dev.yaml's hand-pasted apiKeysSealed/duplicate-
+# gateway-key mistake): a resolved owner/repo string that could go stale or get mistyped if
+# pasted by hand simply never exists as a file to paste into.
+#
+# Field names confirmed against Kyverno's own docs/blog examples for a keyless verifyImages rule
+# (kyverno.io/docs/writing-policies/verify-images/, plus a worked GitHub-OIDC example found via
+# web search, 2026-10-15) — `failureAction` (not the older, chart-version-dependent top-level
+# `validationFailureAction`) and `keyless.subject`/`issuer`/`rekor.url` are the fields that
+# example actually showed; `subject` (an exact match) is used here instead of that example's
+# `subjectRegExp`, because this project knows its own exact repository identity and an exact
+# match is strictly tighter than a regex covering the same string.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-ai-service-images
+  annotations:
+    policies.kyverno.io/title: Verify ai-service images are Cosign-signed by this repo's own CI
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Rejects any Pod whose image matches ghcr.io/__POLARIS_OWNER_REPO__/ai-service unless it
+      carries a valid Cosign keyless signature from this repository's own
+      .github/workflows/ci.yml, running on main (ADR-35/ADR-36). Images from any other
+      registry -- including registry.localhost:5000, what polaris-dev/-staging/-prod actually
+      pull from today -- do not match imageReferences below at all and are completely
+      unaffected by this policy; see docs/security/admission-policy.md for exactly why that gap
+      exists and what it does and does not mean.
+spec:
+  # verifyImages rules need to run at admission time, against the live request, not as a later
+  # background reconciliation pass with no image-pull context to check -- the same reasoning the
+  # worked example above used.
+  background: false
+  rules:
+    - name: verify-cosign-keyless
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service:*"
+            - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service@sha256:*"
+          failureAction: Enforce
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "https://github.com/__POLARIS_OWNER_REPO__/.github/workflows/ci.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev

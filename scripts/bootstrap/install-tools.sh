@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # scripts/bootstrap/install-tools.sh
-# Install pinned versions of k3d, kubectl, helm, gitleaks, actionlint and kubeseal without sudo.
-# Every download is verified against the checksum the project publishes (kubeseal: see its own
-# function below and versions.env's Phase 15 comment for why that is a sandbox-computed checksum
-# rather than a published checksums.txt).
+# Install pinned versions of k3d, kubectl, helm, gitleaks, actionlint, kubeseal and cosign
+# without sudo. Every download is verified against the checksum the project publishes (kubeseal:
+# see its own function below and versions.env's Phase 15 comment for why that is a
+# sandbox-computed checksum rather than a published checksums.txt; cosign DOES publish one, so it
+# follows the k3d/gitleaks/actionlint pattern instead).
 #
 # gitleaks and actionlint (Phase 6) are local-dev conveniences too — the CI workflow installs
 # its own copies the same way, in the runner, since a GitHub-hosted runner starts from nothing
 # every time. This script is the one place both paths share the version pins and the download
-# logic, so a version bump here is a version bump everywhere. kubeseal (Phase 15) is local-dev/
-# target-machine only — nothing in CI seals a secret, so the workflow never needs its own copy.
+# logic, so a version bump here is a version bump everywhere. kubeseal (Phase 15 session 1) is
+# local-dev/target-machine only — nothing in CI seals a secret, so the workflow never needs its
+# own copy. cosign (Phase 15 session 2) is the opposite of kubeseal in that respect: the CI
+# `publish` job installs its own copy the same way gitleaks/actionlint do (`--only cosign`), to
+# sign the image it just pushed with a real GitHub Actions OIDC token — see
+# .github/workflows/ci.yml and ADR-35. Darya also gets a local copy, for `make cosign-verify`.
 #
-# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm|gitleaks|actionlint|kubeseal] [--force]
+# Usage: scripts/bootstrap/install-tools.sh [--prefix DIR] [--only k3d|kubectl|helm|gitleaks|actionlint|kubeseal|cosign] [--force]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +33,7 @@ usage() {
 Usage: $(basename "$0") [--prefix DIR] [--only k3d|kubectl|helm] [--force]
 
   --prefix DIR   install directory (default: \$HOME/.local/bin)
-  --only TOOL    install just one tool (k3d, kubectl, helm, gitleaks, actionlint, kubeseal)
+  --only TOOL    install just one tool (k3d, kubectl, helm, gitleaks, actionlint, kubeseal, cosign)
   --force        reinstall even if the pinned version is already present
 
 Pinned versions come from versions.env.
@@ -190,9 +195,30 @@ install_kubeseal() {
   log_ok "kubeseal installed to $PREFIX/kubeseal"
 }
 
+# cosign (Phase 15 session 2): unlike kubeseal, this release DOES publish a real checksums.txt
+# asset (`cosign_checksums.txt`, confirmed reachable from github.com in this sandbox) -- the
+# standard k3d/gitleaks/actionlint pattern applies, and the release assets are bare binaries
+# named "cosign-linux-<arch>" (no .tar.gz to extract), unlike every tool above except kubectl.
+install_cosign() {
+  needs_install cosign "$COSIGN_VERSION" || return 0
+  local base="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"
+  local asset="cosign-linux-${ARCH}"
+  local expected
+  case "$ARCH" in
+    amd64) expected="$COSIGN_SHA256_AMD64" ;;
+    arm64) expected="$COSIGN_SHA256_ARM64" ;;
+    *) die "No pinned cosign checksum for architecture '$ARCH'" ;;
+  esac
+  log_info "Installing cosign ${COSIGN_VERSION} (${ARCH})"
+  download "$base/$asset" "$TMP/$asset"
+  verify_sha256 "$TMP/$asset" "$expected"
+  install -m 0755 "$TMP/$asset" "$PREFIX/cosign"
+  log_ok "cosign installed to $PREFIX/cosign"
+}
+
 case "$ONLY" in
-  ""|k3d|kubectl|helm|gitleaks|actionlint|kubeseal) ;;
-  *) die "--only must be one of: k3d, kubectl, helm, gitleaks, actionlint, kubeseal" ;;
+  ""|k3d|kubectl|helm|gitleaks|actionlint|kubeseal|cosign) ;;
+  *) die "--only must be one of: k3d, kubectl, helm, gitleaks, actionlint, kubeseal, cosign" ;;
 esac
 
 install_k3d
@@ -201,6 +227,7 @@ install_helm
 install_gitleaks
 install_actionlint
 install_kubeseal
+install_cosign
 
 if [[ ":$ORIGINAL_PATH:" != *":$PREFIX:"* ]]; then
   log_warn "$PREFIX is not on your PATH. Add it permanently with:"

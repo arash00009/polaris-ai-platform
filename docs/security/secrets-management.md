@@ -1,9 +1,10 @@
 # Secrets management: Sealed Secrets, closing the GitOps gap
 
-**Status: written and static-tested in the sandbox, 2026-10-13 — not yet confirmed on the target
-machine.** See ADR-33 for the full decision record; this document is the operational guide —
-how to install the controller, seal a real secret, and what Sealed Secrets does and does not
-protect against.
+**Status: confirmed working end to end on the target machine, 2026-10-15.** See ADR-33 for the
+full decision record and the four real bugs found and fixed along the way (also in
+`docs/troubleshooting.md`'s Phase 15 section); this document is the operational guide — how to
+install the controller, seal a real secret, and what Sealed Secrets does and does not protect
+against.
 
 ## 1. The gap this closes
 

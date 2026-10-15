@@ -423,11 +423,15 @@ Phase 14 section.
 
 ## Phase 15
 
-Status: **in progress — session 1 (Sealed Secrets + egress NetworkPolicy) written and
-static-tested in the sandbox, 2026-10-13, not yet confirmed on the target machine.** Image
-signing (Cosign) and an admission policy enforcing it (Kyverno) are this phase's remaining
-scope, not yet started. Full record: `docs/security/secrets-management.md`,
-`docs/security/network-policy.md`, ADR-33, ADR-34.
+Status: **in progress — session 1 (Sealed Secrets + egress NetworkPolicy) confirmed working on
+the target machine, 2026-10-15** (Sealed Secrets end to end; egress NetworkPolicy at the
+"did not break anything under real load" level, a dedicated per-rule pass still pending — see
+ADR-34). **Session 2 (Cosign keyless signing + Kyverno admission policy) written and
+shellchecked in the sandbox, 2026-10-15, not yet confirmed** — its confirmation path needs a real
+GitHub Actions run before a cluster-side check is even possible, unlike every earlier phase; see
+`docs/security/image-signing.md` §6. Full record: `docs/security/secrets-management.md`,
+`docs/security/network-policy.md`, `docs/security/image-signing.md`,
+`docs/security/admission-policy.md`, `docs/troubleshooting.md`, ADR-33, ADR-34, ADR-35, ADR-36.
 
 ### Sealed Secrets controller, closing the GitOps-bypass gap ADR-30 confirmed for real
 
@@ -450,3 +454,25 @@ scope, not yet started. Full record: `docs/security/secrets-management.md`,
 | 4. Scale | Zero marginal cost per request — `NetworkPolicy` is enforced by the CNI's own datapath, not application code; adding a destination later is a one-line values/template change, not a new mechanism. |
 | 5. Security | Meaningfully reduces blast radius from a compromised pod — DNS, one upstream, and the telemetry pipeline are the *only* places either service can originate a connection to, where previously it was unrestricted. `model-serving`'s own egress is a named, deliberately deferred gap (its needs span pull-time, not a small enumerable allow-list) — not forgotten, not silently assumed safe. |
 | 6. Cloud | The same NetworkPolicy API this project already uses is what a managed Kubernetes cluster (EKS/AKS/GKE) also enforces, typically via a CNI plugin chosen specifically for NetworkPolicy support (Calico, Cilium) rather than k3s's bundled kube-router module — the mechanism carries over directly, only the enforcement implementation changes. |
+
+### Cosign keyless image signing for the `publish` job (session 2)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | A Trivy scan (Phase 6) is a point-in-time statement about known vulnerabilities in what was built; it says nothing about whether the image a cluster later pulls is actually the thing this project's own CI built and scanned, rather than something tampered with or substituted in between. `docs/security/image-scan.md` has named this gap plainly since Phase 6. |
+| 2. Why | Cosign, keyless, via GitHub Actions' own OIDC token — no private key is generated, stored, rotated, or can leak, because there is no long-lived key at all; the trust anchor is "a real run of this exact repository's `ci.yml`, on `main`," checked against Sigstore's public Fulcio/Rekor infrastructure. Signs the exact digest `cmd_publish` just pushed, parsed from `docker push`'s own output, never a mutable tag. |
+| 3. Failure | `id-token: write` missing → the Actions runtime refuses to issue the OIDC token and `cosign sign` fails outright, loudly, in the job's own log — never a silent, unsigned "success." A wrong or stale digest → Cosign signs content nobody will ever pull by that reference, caught by `make cosign-verify` against the real published digest, not assumed correct from the workflow's exit code alone. |
+| 4. Scale | A second image (the gateway) is not signed by this session — `ai-gateway` is never built/published by `ci.yml` at all today, so there is nothing to sign yet; adding it later follows the identical pattern, not a new one. |
+| 5. Security | No new long-lived secret anywhere — the opposite of the risk class Sealed Secrets (ADR-33) exists to manage; keyless signing's only "key" is a short-lived certificate tied to one specific, already-logged CI run. |
+| 6. Cloud | The same mechanism (OIDC-federated keyless signing against Sigstore's public infrastructure) is how GitLab CI, CircleCI and other major CI platforms' own Sigstore integrations work — this is not a GitHub-specific trick, only the OIDC issuer URL changes. |
+
+### Kyverno admission policy verifying those signatures (session 2)
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | A signature nobody ever checks is a claim, not an enforced guarantee. `docs/architecture.md`'s Phase 15 "Done when" line names an admission policy as the fourth and last required piece, alongside secret management, network policy and signing. |
+| 2. Why | A Kyverno `ClusterPolicy` with a keyless `verifyImages` rule, scoped narrowly to `ghcr.io/<owner>/<repo>/ai-service` only — not every image in `polaris-dev`. `polaris-dev`/`-staging`/`-prod` have pulled every image from `registry.localhost:5000/...`, the k3d cluster's own local registry, since Phase 5, never from GHCR; a broader glob would make the webhook try, and correctly fail, to verify a signature for images genuinely never signed, breaking the existing, working local dev pipeline on every deploy. |
+| 3. Failure | The policy's own `verify-demo` command proves both directions for real: a correctly-signed image is admitted, and an unsigned/nonexistent one (a real repo path at a digest one hex character off the real one) is rejected by the webhook itself, not merely left to fail later with `ImagePullBackOff`. |
+| 4. Scale | Zero marginal cost per Pod beyond the one admission check Kyverno already does — a second signed image repository is a second line in the same policy's `imageReferences` list, not a new mechanism. |
+| 5. Security | **Named honestly, not glossed over:** today this policy has nothing to actually enforce against the real, running cluster, because nothing `polaris-dev` deploys ever matches `ghcr.io/<owner>/<repo>/ai-service` — see `docs/security/admission-policy.md` §3. What is confirmed (once a real signed digest exists) is that the *mechanism* works correctly against a direct reference to that real, signed image; wiring an actual environment to deploy from GHCR instead of the local registry is a materially bigger, deliberately out-of-scope change (ADR-36's own "Revisit when"). |
+| 6. Cloud | The same `verifyImages` mechanism is how a production cluster would actually gate `kubectl apply`/CD pipelines on signature verification before the gap named above is closed — Kyverno's own production deployments (per its docs) typically run this exact rule shape against a real, GHCR-or-equivalent-backed deployment path, which is precisely the "Revisit when" this project names rather than fakes having already done. |

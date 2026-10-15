@@ -1,9 +1,12 @@
 # Network policy: ingress (Phase 4/5/9/12) and egress (Phase 15)
 
-**Status: the egress rules below are written and static-tested in the sandbox, 2026-10-13 — not
-yet confirmed on the target machine.** See ADR-34 for the full decision record. The ingress
-rules this document also describes were confirmed on the target machine in Phase 4 and have been
-unchanged since.
+**Status: confirmed on the target machine, 2026-10-15, at the "did not break anything under
+real load" level** — `helm-apply-dev` rolled out cleanly with egress default-deny live,
+`make verify-dev`/`make tenants-smoke` both passed. **Not yet done:** the dedicated,
+per-rule negative test in §5 below has not actually been run for real yet — see ADR-34 for the
+full decision record and exactly what that gap does and does not mean. The ingress rules this
+document also describes were confirmed on the target machine in Phase 4 and have been unchanged
+since.
 
 ## 1. What changed, and what did not
 

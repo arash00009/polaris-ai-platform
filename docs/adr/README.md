@@ -755,11 +755,24 @@ actually required rather than demonstrated logically.
 
 ### ADR-33: Sealed Secrets for `GATEWAY_API_KEYS_JSON`, replacing the bypass-GitOps direct `helm upgrade`
 
-Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **not yet confirmed on
-the target machine.** `helm lint`/`helm template`/a real `kubeseal`/a real controller are all
-target-machine-only steps (no `helm`, no cluster, no `kubeseal` in the sandbox this was written
-in — same constraint every previous phase's Helm/cluster work has carried). What was done in the
-sandbox: every new Helm values key was hand-verified against the chart's own real
+Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **confirmed working end
+to end on the target machine, 2026-10-15.** The controller installed cleanly (after fixing a real
+repo-URL break, Bitnami's GitHub org rename from `bitnami-labs` to `bitnami` — see
+`docs/troubleshooting.md`), `make gateway-seal ENV=dev` produced real ciphertext, `helm-apply-dev`
+reached `REVISION: 17`/`STATUS: deployed`, the `SealedSecret` reports `Synced: True`, and the live
+`ai-gateway-api-keys` Secret decodes to the real demo/acme/globex keys — materialised by the
+controller from committed ciphertext, not the old manual `kubectl apply` bypass this ADR
+retires. The actual payoff is confirmed, not assumed: both `polaris-root` and `ai-platform-dev`'s
+`syncPolicy.automated` are back at `{"prune":true,"selfHeal":true}` and have stayed there through
+everything above — the exact setting that used to revert this Secret to the chart's `"{}"`
+placeholder within minutes (ADR-30's own confirmed gap) no longer breaks anything. `make
+tenants-smoke`'s `demo` tier survived 21 real, authenticated requests before its configured
+`429` — proof the gateway is authenticating through the Sealed-Secrets-sourced key, not just that
+the Secret object exists. Three real bugs were found and fixed along the way (the repo-URL break,
+a YAML duplicate-top-level-key landmine caught before any apply, a Helm/Argo resource-adoption
+annotation gap, and a genuine Helm-delete/controller-reconcile race — see `docs/troubleshooting.md`'s
+Phase 15 section for the full account of each). What was done in the sandbox before any of that:
+every new Helm values key was hand-verified against the chart's own real
 `templates/*.yaml` and `values.yaml` (fetched from `raw.githubusercontent.com`, the one
 `*.github.io`-style host this sandbox's egress proxy accepts is `raw.githubusercontent.com`
 itself, not `bitnami-labs.github.io` — confirmed by a direct, failing `curl`), `kubeseal`'s own
@@ -854,23 +867,33 @@ published-checksums-file-derived) `KUBESEAL_SHA256_AMD64`/`KUBESEAL_SHA256_ARM64
 `scripts/bootstrap/install-tools.sh` and `scripts/lib/common.sh`'s `tool_version()` both gained
 `kubeseal` support. `helm/ai-platform/templates/gateway-secret.yaml` and `scripts/deploy/
 helm.sh`'s `cmd_apply` both gained a guard against double-rendering/double-reading once sealed
-secrets is on. **Status: not yet confirmed on the target machine** — `make sealed-secrets-install`,
-`make gateway-seal ENV=dev`, pasting the real ciphertext into `values-dev.yaml`, and a real
-`helm-apply-dev`/Argo CD sync proving the gateway still authenticates correctly with a
-SealedSecret-sourced key are all still pending.
+secrets is on. `SEALED_SECRETS_CHART_VERSION` in `versions.env`, left deliberately unpinned above,
+is now pinned at `2.20.0` (appVersion `0.40.0`), read straight off the real target-machine `helm
+list` output. **Status: confirmed working end to end on the target machine, 2026-10-15** — `make
+sealed-secrets-install`, `make gateway-seal ENV=dev`, pasting the real ciphertext into
+`values-dev.yaml`, and a real `helm-apply-dev`/Argo CD sync all done for real, with the gateway
+authenticating correctly through a SealedSecret-sourced key under `selfHeal` fully re-enabled (see
+Status above and `docs/troubleshooting.md`'s Phase 15 section for the four real bugs found and
+fixed along the way).
 
-Revisit when: the target-machine run above surfaces a real bug (expected, per this project's own
-established pattern — every previous Helm/cluster-touching phase has found at least one); `gateway.
-enabled` is ever turned on for staging/prod (the same `additionalNamespaces`/`sealedSecrets.
-enabled` steps need repeating for that environment, not automatic); a second real Secret is ever
-needed anywhere in this project (the same pattern, not a new one, would apply).
+Revisit when: `gateway.enabled` is ever turned on for staging/prod (the same
+`additionalNamespaces`/`sealedSecrets.enabled` steps need repeating for that environment, not
+automatic); a second real Secret is ever needed anywhere in this project (the same pattern, not a
+new one, would apply); the `sealed-secrets` namespace is ever tightened from Pod Security
+`baseline` to `restricted` (named as a deferred gap, not yet attempted).
 
 ### ADR-34: Egress NetworkPolicy default-deny for `ai-service`/`ai-gateway`, dev-only until confirmed
 
-Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **not yet confirmed on
-the target machine** (no cluster in the sandbox this was written in; `helm template`/`helm lint`
-against the real binary is the target-machine verification step, same as every previous Helm
-change in this project).
+Status: accepted; written and static-tested in the sandbox, 2026-10-13 — **partially confirmed on
+the target machine, 2026-10-15.** `helm-apply-dev`'s rollout succeeded with egress default-deny
+live (`REVISION: 17`, `STATUS: deployed`) and `cmd_apply`'s own built-in "pods stayed Ready after
+the NetworkPolicy was applied" check passed, and `make tenants-smoke`'s `demo` tier survived 21
+real requests through `ai-service`'s configured backend over that same egress path. What is
+**not yet done**: a dedicated verification pass of this ADR's own four allow-rules individually
+(DNS, model-serving, the OTel Collector, and, for `ai-gateway`, `ai-service` itself) — the checks
+above exercise the policy as a whole under normal operation, not each rule on its own, so a
+narrowly-missed rule that happens not to be exercised by `verify-dev`/`tenants-smoke` today could
+still be silently absent. See `docs/troubleshooting.md`'s Phase 15 section.
 
 Context: `helm/ai-platform/templates/networkpolicy.yaml`'s own Phase 5/9 comments were explicit
 that `policyTypes` only ever listed `"Ingress"` — egress was unrestricted from Phase 5 through
@@ -929,16 +952,170 @@ Consequences: a new `networkPolicy.egress` block in `values.yaml` (off by defaul
 and a new `ai-gateway-allow-egress` object in `templates/gateway-networkpolicy.yaml`, both gated on
 the same flag. `values-dev.yaml`'s own comment on `POLARIS_BACKEND=openai_compat`'s model-serving
 DNS name was updated to stop claiming egress is unconditionally unrestricted, since it no longer
-is. **Status: not yet confirmed on the target machine** — a real `helm-apply-dev`, followed by
-`make verify-dev` and `make tenants-smoke` both still passing with egress now default-deny, is the
-real test: if either backend call (model-serving or the OTel Collector) were blocked by a mistake
-in this policy, those are exactly the checks that would catch it, immediately and loudly, not
-silently.
+is. **Status: confirmed, target machine, 2026-10-15, at the "did not break anything" level** — a
+real `helm-apply-dev` (`REVISION: 17`) with egress now default-deny, `cmd_apply`'s own Ready-pods
+check, and `make tenants-smoke` all passed; `make verify-dev`'s `ai-answer` check hit the
+already-documented Ollama-latency `504` (a timeout, not evidence of a blocked egress rule).
+**Not yet done**, and not to be confused with the above: a dedicated pass confirming each of the
+four allow-rules individually, rather than only the policy's net effect under normal load.
 
-Revisit when: the target-machine run above surfaces a real bug (same expectation ADR-33 states for
-its own target-machine run); `model-serving`'s own egress needs are ever actually enumerated and
+Revisit when: a dedicated per-rule verification pass is run (the gap this ADR's own Status now
+names, not a hypothetical); `model-serving`'s own egress needs are ever actually enumerated and
 hardened (this ADR's own named, deferred gap); `networkPolicy.egress.enabled` is ever turned on for
 staging/prod (confirm first, the same discipline this ADR itself followed for dev).
+
+### ADR-35: Cosign keyless image signing (GitHub Actions OIDC) for the `publish` job
+
+Status: accepted; written and shellchecked in the sandbox, 2026-10-15 — **not yet confirmed, and
+the confirmation step is structurally different from every previous ADR in this project.** Every
+prior "target machine" verification has meant running a command on Darya; this one needs a real
+GitHub Actions run of the updated `ci.yml` on a GitHub-hosted runner, because keyless signing
+needs the Actions runtime's own OIDC token issuance, which nothing local can produce. See
+`docs/security/image-signing.md` §6 for the exact real sequence this implies.
+
+Context: `docs/security/image-scan.md` has said plainly since Phase 6 that "the image is not
+signature-verified or signed (cosign, Phase 15)," and `docs/architecture.md`'s own CI/CD flow
+diagram and Security Controls Matrix have named Cosign keyless signing as this phase's remaining
+scope since before Phase 15 session 1 started. A Trivy scan is a point-in-time statement about
+known vulnerabilities in what was built; it says nothing about whether the thing a cluster later
+pulls is actually the thing that was scanned, built by this project's own CI, and not tampered
+with or substituted in between. Signing closes that second, separate claim.
+
+Decision:
+
+- **Keyless (Fulcio/Rekor, via GitHub Actions OIDC), not a stored signing key pair** — the
+  alternative (`cosign generate-key-pair`, the private key held as a GitHub Actions secret)
+  reintroduces exactly the class of problem this whole phase exists to close: a long-lived secret
+  that must be generated, stored, rotated, and can leak. Keyless signing's trust anchor is "a
+  real run of this exact repository's `ci.yml`, on `main`," verified against Sigstore's own
+  public Fulcio/Rekor infrastructure — no key this project has to manage at all. `cosign sign
+  --yes <digest>` is the entire signing step; `--yes` only skips an interactive confirmation
+  prompt that would otherwise hang a non-interactive CI job, it does not weaken what gets
+  checked.
+- **Sign the exact digest `cmd_publish` just pushed, never a mutable tag** — `scripts/build/
+  image.sh`'s `cmd_publish` now parses the digest out of `docker push`'s own stdout (a
+  `<tag>: digest: sha256:... size: ...` line every push produces) and prints it on a dedicated,
+  grep-able `GHCR_IMAGE_DIGEST=` line, rather than trusting `docker inspect --format '{{index
+  .RepoDigests 0}}'`, which depends on the local daemon's bookkeeping actually being populated —
+  an assumption not worth making when the whole point is a digest Cosign can trust. A tag
+  (`:0.4.0-<sha>`) can be retargeted after signing; a digest cannot.
+- **`id-token: write` added to the `publish` job's own `permissions` block, and nowhere else** —
+  the one new permission this phase needs; only this job runs on a push to `main` and only it
+  ever needs to prove this workflow's own identity to Fulcio. `build-scan-deploy` and the fast
+  jobs above it are untouched.
+- **`cosign` installed via this project's own `install-tools.sh --only cosign`, not the
+  `sigstore/cosign-installer` marketplace action** — cosign's release DOES publish a real,
+  checksums.txt-backed release (confirmed by downloading it directly, 2026-10-15, unlike
+  kubeseal's own exception), so the standard k3d/gitleaks/actionlint pattern applies cleanly,
+  keeping one, already-audited tool-install path for every pinned binary in this project rather
+  than adding a second one, from a different supply chain, for just this tool.
+
+Alternatives: a stored key pair — rejected, see Decision above. Signing inside `build-scan-deploy`
+instead of `publish` — rejected: that job runs on every push and PR, has no GHCR credentials and
+no `id-token: write`, and (per ADR-24) is deliberately scoped to "build, scan, SBOM, ephemeral-
+cluster deploy," not publishing or signing anything. Using GitHub's own `actions/attest-build-
+provenance` instead of Cosign directly — not evaluated in depth; Cosign was already this
+project's own named choice in `docs/architecture.md` before this session started, and introducing
+a second signing mechanism to compare against it was judged not worth the scope increase.
+
+Consequences: `scripts/build/image.sh`'s `cmd_publish` gained digest-capture/printing (a real
+behavior change to an already-shipped, already-used script — re-run `make lint`/`make test`
+after this change, not assumed safe because "it only adds a print statement"). `versions.env`
+gained `COSIGN_VERSION`/`COSIGN_SHA256_AMD64`/`COSIGN_SHA256_ARM64` (checksums read from a real
+downloaded `cosign_checksums.txt`, not computed or guessed). `install-tools.sh`/`common.sh`
+gained `cosign` support. `.github/workflows/ci.yml`'s `publish` job gained `id-token: write` and
+two new steps. A new `scripts/verify/cosign-verify.sh` (`make cosign-verify`) lets Darya confirm
+a signature independently of any CI log. **Status: not yet confirmed** — see this ADR's own
+Status line above for exactly why that confirmation is sequenced differently here than for any
+earlier phase.
+
+Revisit when: the real GitHub Actions run above surfaces a bug (expected, per this project's own
+established pattern); the gateway image (`ai-gateway`) is ever added to the CI publish pipeline
+(it is not today — only `ai-service` is ever built-scanned-published by `ci.yml`; signing it
+would follow the identical pattern, not a new one); a stored-key fallback is ever needed for a
+registry or environment that cannot reach Fulcio/Rekor's public endpoints.
+
+### ADR-36: Kyverno `ClusterPolicy` verifies Cosign signatures for `ai-service` images
+
+Status: accepted; written and shellchecked in the sandbox, 2026-10-15 — not yet confirmed on the
+target machine (no cluster in the sandbox this was written in); sequenced after ADR-35's own
+real-signature confirmation, since `verify-demo` needs a real signed digest as input.
+
+Context: a signature nobody ever checks is a claim, not an enforced guarantee. `docs/
+architecture.md`'s Phase 15 "Done when" line names "admission policy" as the fourth and last of
+this phase's required pieces, alongside secret management (ADR-33), network policy (ADR-34) and
+signing (ADR-35). Kyverno was already this project's own named choice (`docs/architecture.md`
+§579: "Kyverno policies are readable YAML").
+
+Decision:
+
+- **A `ClusterPolicy` with a `verifyImages` rule, keyless, scoped narrowly to `ghcr.io/<owner>/
+  <repo>/ai-service` only** — never a broader glob (e.g. `*/ai-service*` or every image in
+  `polaris-dev`). `polaris-dev`/`-staging`/`-prod` pull every image from `registry.localhost:
+  5000/...`, the k3d cluster's own local registry, never from GHCR (true since Phase 5, unchanged
+  by this session) — a broader glob would have the webhook try, and correctly fail, to verify a
+  signature for images that were genuinely never signed, breaking the existing, working local
+  dev pipeline on every single deploy. Scoping narrowly to the one path that is ever actually
+  signed means the policy has a precise, honest claim: "nothing pulls `ghcr.io/<owner>/<repo>/
+  ai-service` unsigned," not the broader, false claim "nothing unsigned runs in this cluster."
+- **The policy is rendered from a `.tmpl` file and applied directly via `kubectl apply -f -` over
+  stdin, never written to disk** — `scripts/bootstrap/kyverno.sh`'s `apply-policy` substitutes
+  this repo's real, lowercased `owner/repo` (resolved the same way `scripts/build/image.sh`'s own
+  `ghcr_owner_repo()` is, deliberately duplicated per ADR-22) into `deploy/platform/kyverno/
+  policies/verify-ai-service-images.yaml.tmpl`. Phase 15 session 1's own real bug — a hand-pasted
+  ciphertext value and a duplicate-top-level-YAML-key mistake in `values-dev.yaml`, both caught
+  before they shipped — is exactly the class of error this avoids structurally: a resolved value
+  that could go stale or get mistyped if pasted by hand simply never exists as a file to paste
+  into.
+- **`subject` (an exact match), not `subjectRegExp`** — a worked keyless example found during
+  this session's research used a regex (`subjectRegExp: "https://github\\.com/company/.+"`), but
+  this project knows its own exact repository identity at apply time, and an exact match is
+  strictly tighter than a regex covering the same string for no added benefit.
+- **`failureAction: Enforce`, not `Audit`** — an audit-mode policy only reports, it does not
+  block, which would make `verify-demo`'s own negative case (proving a genuinely unsigned/
+  nonexistent image is actually rejected, not merely logged) impossible to demonstrate.
+- **`background: false`** — `verifyImages` needs the live admission request's own image-pull
+  context; a background reconciliation pass has nothing to check against, the same reasoning a
+  worked example found during this session's research used.
+- **A dedicated `verify-demo` command, not just "apply the policy and trust it"** — two throwaway
+  `Pod`s in `default`, cleaned up unconditionally: a positive case (the real signed digest ADR-35
+  produced — must be admitted) and a negative case (the same real repo path, at a digest one hex
+  character away from the real one — guaranteed to be a real-looking, never-pushed, never-signed
+  reference, without needing to already know any actual prior unsigned tag's name — must be
+  rejected by the webhook itself, not merely fail later with `ImagePullBackOff`).
+
+Alternatives: the newer `ImageValidatingPolicy` CRD some recent Kyverno versions offer alongside
+the long-standing `ClusterPolicy`/`verifyImages` mechanism — not used; this session's research
+did not turn up a complete, trustworthy worked example for it the way it did for the
+`ClusterPolicy` approach, and the latter remains fully supported at the pinned chart's
+`appVersion` (confirmed via `docs/architecture.md`'s own research this session, 2026-10-15).
+Scoping the policy to every image in `polaris-dev` instead of just `ghcr.io/.../ai-service` —
+rejected, see Decision above: it would make a false claim this project cannot back up today, not
+a stronger true one. OPA/Gatekeeper instead of Kyverno — not evaluated; Kyverno was already this
+project's own named choice before this session started.
+
+Consequences: a new `kyverno` namespace (`deploy/platform/kyverno/namespace.yaml`, Pod Security
+`baseline`, same reasoning as every other platform namespace in this project), `kyverno-values.
+yaml` (four controllers, `replicas: 1` each for a single-node dev cluster, every other key at the
+chart's own confirmed-real default), the policy template above, a new `scripts/bootstrap/
+kyverno.sh` (install/status/apply-policy/verify-demo/uninstall, same shape as `sealed-secrets.
+sh`), five new `Makefile` targets, and `versions.env` gained `KYVERNO_HELM_REPO`/
+`KYVERNO_CHART_VERSION` (the latter deliberately left unpinned, same two-step as
+`SEALED_SECRETS_CHART_VERSION`/`OPENCOST_CHART_VERSION` before it — resolve for real on the
+target machine, pin in a deliberate follow-up commit). **Status: not yet confirmed** — and, per
+`docs/security/admission-policy.md` §3, even a full target-machine confirmation of install +
+`verify-demo` would still only prove the mechanism works against a direct GHCR reference, not
+that it covers anything `polaris-dev` itself actually runs — named as this ADR's own real,
+current scope limit, not glossed over.
+
+Revisit when: the target-machine run surfaces a real bug (expected, per this project's own
+established pattern); `KYVERNO_CHART_VERSION` is pinned once a real install resolves it (the
+same follow-up commit pattern `SEALED_SECRETS_CHART_VERSION` already went through); and, the
+larger one — `polaris-dev`'s own deployment is ever changed to pull the real, signed GHCR image
+instead of a local-registry retag, which is what would actually let this policy enforce against
+a real, running workload rather than only a demonstration `Pod`. That is a materially bigger
+change to this project's "build and iterate with zero network dependency" deploy model than
+anything else in Phase 15, and is deliberately not attempted inside this already-large session.
 
 ## Template for a new record
 

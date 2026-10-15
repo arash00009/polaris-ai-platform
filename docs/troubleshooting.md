@@ -357,5 +357,38 @@ not re-chased further. Egress NetworkPolicy (ADR-34) has not yet had a dedicated
 pass of its own beyond "pods stayed Ready after the NetworkPolicy was applied" (`cmd_apply`'s own
 built-in check, which passed).
 See ADR-33 / ADR-34 and `docs/security/secrets-management.md` / `docs/security/network-policy.md`
-for what is still pending confirmation once Sealed Secrets itself is installed.
+for the full record; the one thing still pending there is a dedicated per-rule egress
+verification pass (ADR-34's own "Revisit when"), not Sealed Secrets itself, which is done.
+
+## Phase 15: Security / supply chain — session 2 (Cosign keyless signing, Kyverno admission policy) (`scripts/bootstrap/kyverno.sh`, `deploy/platform/kyverno/`, `.github/workflows/ci.yml`)
+
+Status: written and shellchecked in the sandbox, 2026-10-15 — **not yet confirmed on the target
+machine, and this phase's own confirmation path is structurally different from every previous
+one in this project.** Every prior phase's "confirm it for real" step has meant: run a command on
+Darya. Signing (ADR-35) cannot start there — keyless Cosign signing needs a real GitHub Actions
+OIDC token, which only the Actions runtime itself issues, not Darya's local k3d/manual-build
+workflow and not the sandbox this was written in either. The real sequence, laid out in full in
+`docs/security/image-signing.md` §6: (1) push this commit and let a real GitHub Actions run of
+the updated `ci.yml` actually sign a published image; (2) confirm that run's `cosign sign` step
+succeeded in its own log; (3) only then, from Darya, `make cosign-verify DIGEST=<that digest>`,
+confirming independently that the signature verifies; (4) only then does Kyverno's own
+`verify-demo` (ADR-36) have a real signed digest to demonstrate against — `kyverno-install`/
+`kyverno-apply-policy`/`kyverno-status` can be confirmed on Darya at any time after `make
+cluster-up`, independently of steps 1–3, but `verify-demo` cannot.
+
+No rows below yet — nothing in this session has been run against a real GitHub Actions run or a
+real cluster. This section exists so the next real run's findings have a place to land, the same
+convention every other phase's troubleshooting section follows; it is not evidence this session
+skipped the "is a cluster/runner going to disagree with me" question, only that the answer is not
+known yet because the first command that could surface a disagreement has not been run for real.
+
+One thing worth naming here rather than only in `docs/security/admission-policy.md` §3: even a
+fully successful real run through all four steps above would **not** mean `polaris-dev` itself is
+now protected by this policy — `polaris-dev`/`-staging`/`-prod` pull from `registry.localhost:
+5000/...`, never from the `ghcr.io/<owner>/<repo>/ai-service` path the policy actually checks, a
+gap this session names honestly (ADR-36's own "Revisit when") rather than quietly leaving for
+someone to discover later by noticing the policy "isn't doing anything" to the real deployment.
+
+See ADR-35 / ADR-36 and `docs/security/image-signing.md` / `docs/security/admission-policy.md`
+for the full decision record and exactly what each piece does and does not prove.
 

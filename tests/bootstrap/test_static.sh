@@ -364,18 +364,23 @@ else
 fi
 
 # 39. The workflow defines every job the pipeline is supposed to have, and nothing scope-creeps
-# into Phase 7/8/15/18 (signing, gitops commit, Argo CD, canary, post-deploy verification).
+# into Phase 7/8/18 (gitops commit, Argo CD, canary, post-deploy verification). Phase 15 session 2
+# (ADR-35) is now the one deliberate, legitimate exception to this guard's original "no cosign
+# either" list — signing moved from "a later phase" to "this one" — so `cosign` was removed from
+# the forbidden pattern below in that same commit, not loosened casually: everything else
+# (GitOps/Argo/canary) remains exactly as out-of-scope for this single-repo CI file as it always
+# was, and still fails this check if it ever shows up here.
 if [[ -f "$WF" ]]; then
   for job in lint-and-test secrets-scan deps-audit workflow-lint build-scan-deploy publish; do
     if grep -qE "^  ${job}:" "$WF"; then ok "$WF defines job: $job"; else bad "$WF is missing job: $job"; fi
   done
   # Comment lines may legitimately explain what is deliberately NOT here (see the file header);
   # only real content (job/step definitions) counts as scope creep.
-  out_of_scope="$(grep -vE '^\s*#' "$WF" | grep -inE 'cosign|argo-?cd|argo ?rollouts|gitops|sealed-?secret' || true)"
+  out_of_scope="$(grep -vE '^\s*#' "$WF" | grep -inE 'argo-?cd|argo ?rollouts|gitops|sealed-?secret' || true)"
   if [[ -z "$out_of_scope" ]]; then
-    ok "$WF stays inside Phase 6's scope (no signing/GitOps/Argo/canary references)"
+    ok "$WF stays inside Phase 6+15's scope (no GitOps/Argo/canary references)"
   else
-    bad "$WF references something out of Phase 6's scope (belongs to a later phase): $out_of_scope"
+    bad "$WF references something out of scope (belongs to a later phase): $out_of_scope"
   fi
 fi
 
@@ -1608,6 +1613,115 @@ if [[ -f docs/security/secrets-management.md && -f docs/security/network-policy.
   ok "docs/security/secrets-management.md and docs/security/network-policy.md both exist"
 else
   bad "docs/security/ is missing secrets-management.md or network-policy.md"
+fi
+
+# --- Phase 15 session 2: Cosign keyless signing, Kyverno admission policy ----------------------
+# Same "no cluster, no real CI run yet" status as session 1's own checks above until the first
+# real GitHub Actions run — these only verify the sandbox-side shape (files exist, reference each
+# other correctly), never anything that needs a cluster or a real signature.
+
+# 127. versions.env: cosign pinned with checksums read from a real downloaded checksums.txt
+# (unlike kubeseal's sandbox-computed exception), plus the Kyverno chart repo/version pair
+# (version deliberately left unpinned, same two-step as SEALED_SECRETS_CHART_VERSION)
+if grep -q '^COSIGN_VERSION=' versions.env && grep -q '^COSIGN_SHA256_AMD64=' versions.env && grep -q '^COSIGN_SHA256_ARM64=' versions.env; then
+  ok "versions.env pins COSIGN_VERSION and both architectures' checksums"
+else
+  bad "versions.env is missing COSIGN_VERSION or one of COSIGN_SHA256_AMD64/ARM64"
+fi
+if grep -q '^KYVERNO_HELM_REPO=' versions.env && grep -q '^KYVERNO_CHART_VERSION=' versions.env; then
+  ok "versions.env declares KYVERNO_HELM_REPO and KYVERNO_CHART_VERSION (the latter deliberately unpinned until a real install)"
+else
+  bad "versions.env is missing KYVERNO_HELM_REPO or the KYVERNO_CHART_VERSION line"
+fi
+
+# 128. install-tools.sh/common.sh both know about cosign, the same way they already know kubeseal
+if grep -q 'install_cosign' scripts/bootstrap/install-tools.sh && grep -q 'cosign)' scripts/lib/common.sh; then
+  ok "install-tools.sh and common.sh's tool_version() both know about cosign"
+else
+  bad "install-tools.sh or common.sh's tool_version() is missing cosign support"
+fi
+
+# 129. image.sh's cmd_publish prints a parseable digest line for the CI publish job to sign
+if grep -q 'GHCR_IMAGE_DIGEST' scripts/build/image.sh; then
+  ok "image.sh's cmd_publish prints a GHCR_IMAGE_DIGEST= line for Cosign to sign"
+else
+  bad "image.sh's cmd_publish does not print a parseable digest — nothing for the CI publish job's cosign step to sign"
+fi
+
+# 130. ci.yml's publish job: id-token: write (needed for keyless OIDC) and an actual cosign sign step
+if grep -q 'id-token: write' .github/workflows/ci.yml && grep -q 'cosign sign' .github/workflows/ci.yml; then
+  ok "ci.yml's publish job has id-token: write and a cosign sign step"
+else
+  bad "ci.yml's publish job is missing id-token: write or a cosign sign step"
+fi
+if grep -q 'install-tools.sh --only cosign' .github/workflows/ci.yml; then
+  ok "ci.yml installs cosign the same way gitleaks/actionlint already are (--only, pinned, checksum-verified), not a marketplace action"
+else
+  bad "ci.yml does not install cosign via install-tools.sh --only cosign"
+fi
+
+# 131. the Kyverno platform files exist, and the policy is a template holding a placeholder,
+# never a pre-resolved owner/repo value baked in and committed
+KY_DIR="deploy/platform/kyverno"
+if [[ -f "$KY_DIR/namespace.yaml" && -f "$KY_DIR/kyverno-values.yaml" && -f "$KY_DIR/policies/verify-ai-service-images.yaml.tmpl" ]]; then
+  ok "exists: $KY_DIR/namespace.yaml, kyverno-values.yaml and the policy template"
+else
+  bad "$KY_DIR is missing namespace.yaml, kyverno-values.yaml or the policy template"
+fi
+for f in "$KY_DIR/namespace.yaml" "$KY_DIR/kyverno-values.yaml"; do
+  if [[ -f "$f" ]] && python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$f" 2>/dev/null; then
+    ok "$f parses as valid YAML"
+  else
+    bad "$f is missing or does not parse as valid YAML"
+  fi
+done
+if grep -q '__POLARIS_OWNER_REPO__' "$KY_DIR/policies/verify-ai-service-images.yaml.tmpl" 2>/dev/null \
+  && grep -q 'verifyImages' "$KY_DIR/policies/verify-ai-service-images.yaml.tmpl" 2>/dev/null; then
+  ok "the policy template uses the __POLARIS_OWNER_REPO__ placeholder (never a resolved, committed value) and defines verifyImages"
+else
+  bad "the policy template is missing the __POLARIS_OWNER_REPO__ placeholder or a verifyImages rule"
+fi
+
+# 132. scripts/bootstrap/kyverno.sh and scripts/verify/cosign-verify.sh exist, are executable,
+# and reference the real mechanisms they claim to (never applying a resolved file from disk)
+KY_SCRIPT="scripts/bootstrap/kyverno.sh"
+if [[ -x "$KY_SCRIPT" ]] && grep -q 'apply-policy' "$KY_SCRIPT" && grep -q 'verify-demo' "$KY_SCRIPT" \
+  && grep -q "kctl apply -f -" "$KY_SCRIPT"; then
+  ok "$KY_SCRIPT is executable and applies the rendered policy from stdin, never a file on disk"
+else
+  bad "$KY_SCRIPT is missing, not executable, or does not apply-policy/verify-demo via stdin"
+fi
+COSIGN_VERIFY_SCRIPT="scripts/verify/cosign-verify.sh"
+if [[ -x "$COSIGN_VERIFY_SCRIPT" ]] && grep -q 'certificate-identity' "$COSIGN_VERIFY_SCRIPT" && grep -q 'certificate-oidc-issuer' "$COSIGN_VERIFY_SCRIPT"; then
+  ok "$COSIGN_VERIFY_SCRIPT is executable and verifies by certificate identity + OIDC issuer, not a bare 'cosign verify' with no identity pinned"
+else
+  bad "$COSIGN_VERIFY_SCRIPT is missing, not executable, or does not pin --certificate-identity/--certificate-oidc-issuer"
+fi
+
+# 133. Makefile: the six new Phase 15 session 2 targets exist
+for target in cosign-verify kyverno-install kyverno-status kyverno-apply-policy kyverno-verify-demo kyverno-uninstall; do
+  if grep -qE "^${target}:" Makefile; then
+    ok "Makefile target: $target"
+  else
+    bad "Makefile is missing target: $target"
+  fi
+done
+
+# 134. README.md / ADR / docs/security/*.md all gained Phase 15 session 2 material
+if grep -q 'ADR-35' docs/adr/README.md 2>/dev/null && grep -q 'ADR-36' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-35 and ADR-36"
+else
+  bad "docs/adr/README.md is missing ADR-35 (Cosign signing) or ADR-36 (Kyverno admission policy)"
+fi
+if [[ -f docs/security/image-signing.md && -f docs/security/admission-policy.md ]]; then
+  ok "docs/security/image-signing.md and docs/security/admission-policy.md both exist"
+else
+  bad "docs/security/ is missing image-signing.md or admission-policy.md"
+fi
+if grep -E '^\| 15 \|' README.md | grep -qi 'session 2'; then
+  ok "README.md's Phase 15 status row mentions session 2"
+else
+  bad "README.md's Phase 15 status row does not mention session 2"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"

@@ -187,6 +187,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Phase 15 session 2 / ADR-35: the one permission this job did not need before. Cosign's
+      # keyless signing asks the Actions runtime for a short-lived OIDC token identifying this
+      # exact workflow run (repo + ref + workflow file), trades it with Fulcio for a short-lived
+      # signing certificate, and publishes the signature to the public Rekor transparency log --
+      # no private key is generated, stored, or rotated anywhere. Without this permission the
+      # runtime refuses to issue that token and `cosign sign` fails outright, not silently.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -198,4 +205,17 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Publish (retag + push, no rebuild)
-        run: make image-publish
+        id: publish
+        run: make image-publish | tee /tmp/publish.log
+      - name: Capture the published digest for signing
+        id: image
+        run: grep '^GHCR_IMAGE_DIGEST=' /tmp/publish.log | tail -n1 >> "$GITHUB_OUTPUT"
+      # Installed the same way gitleaks/actionlint already are in the jobs above (`--only`,
+      # versions.env-pinned, checksum-verified) -- not the sigstore/cosign-installer marketplace
+      # action, to keep this project's one, already-audited tool-install path for every pinned
+      # binary rather than adding a second one for just this tool. See ADR-35.
+      - name: Install cosign (pinned in versions.env)
+        run: ./scripts/bootstrap/install-tools.sh --only cosign
+      - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Sign the published image (keyless, GitHub OIDC — ADR-35)
+        run: cosign sign --yes "${{ steps.image.outputs.GHCR_IMAGE_DIGEST }}"

@@ -34,7 +34,10 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	obs-install obs-status obs-password obs-grafana obs-dashboard-configmap obs-uninstall \
 	model-serving-install model-serving-status model-serving-pull model-serving-uninstall \
 	finops-install finops-status finops-ui finops-dashboard-configmap finops-uninstall \
-	tenants-smoke
+	tenants-smoke \
+	sealed-secrets-install sealed-secrets-status sealed-secrets-fetch-cert sealed-secrets-uninstall gateway-seal \
+	cosign-verify \
+	kyverno-install kyverno-status kyverno-apply-policy kyverno-verify-demo kyverno-uninstall
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -115,6 +118,9 @@ image-sbom: ## Write a CycloneDX software bill of materials for the image to art
 
 image-publish: ## Retag the already-built image and push it to GHCR (needs: docker login ghcr.io first)
 	./scripts/build/image.sh publish
+
+cosign-verify: ## Verify a published image's Cosign signature really came from this repo's own CI (needs: make tools-install; set DIGEST=ghcr.io/<owner>/<repo>/ai-service@sha256:...)
+	./scripts/verify/cosign-verify.sh $(DIGEST)
 
 # --- Phase 12: ai-gateway (app/gateway) — same targets as the AI service above, one app each ---
 
@@ -388,3 +394,25 @@ sealed-secrets-uninstall: ## Remove the sealed-secrets controller (any already-a
 
 gateway-seal: ## Seal deploy/platform/gateway/api-keys.$(ENV).local.json against the real controller and print the ciphertext to paste into values-$(ENV).yaml (needs: make sealed-secrets-install; set ENV=dev|staging|prod)
 	./scripts/deploy/seal-gateway-secret.sh $(or $(ENV),dev)
+
+# --- Phase 15 session 2: image signing (ADR-35 Cosign) + admission policy (ADR-36 Kyverno) -----
+# Cosign signing itself needs no install target here: it happens inside .github/workflows/
+# ci.yml's `publish` job, on a GitHub-hosted runner, using a real GitHub Actions OIDC token --
+# nothing Darya runs locally can reproduce that. `make cosign-verify` (above) and the targets
+# below are the target-machine-side half: install the in-cluster verifier, then confirm against
+# whatever a real, signed CI run actually published.
+
+kyverno-install: ## Install Kyverno into its own kyverno namespace (needs: make cluster-up)
+	./scripts/bootstrap/kyverno.sh install
+
+kyverno-status: ## Show Kyverno's Helm release, pods, and the verify-ai-service-images ClusterPolicy's status
+	./scripts/bootstrap/kyverno.sh status
+
+kyverno-apply-policy: ## Render and apply the verify-ai-service-images ClusterPolicy for this repo's real owner/repo (needs: make kyverno-install)
+	./scripts/bootstrap/kyverno.sh apply-policy
+
+kyverno-verify-demo: ## Prove the policy admits a real signed image and rejects an unsigned one (needs: make kyverno-apply-policy; set REF=ghcr.io/<owner>/<repo>/ai-service@sha256:... from a real, signed CI publish run)
+	./scripts/bootstrap/kyverno.sh verify-demo $(REF)
+
+kyverno-uninstall: ## Remove the verify-ai-service-images policy and Kyverno itself
+	./scripts/bootstrap/kyverno.sh uninstall

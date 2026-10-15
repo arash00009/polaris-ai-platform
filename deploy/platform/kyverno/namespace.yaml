@@ -1,0 +1,26 @@
+# deploy/platform/kyverno/namespace.yaml — Phase 15 session 2 / ADR-36.
+#
+# A dedicated namespace, not kube-system (the chart's own README examples) or bundled into an
+# existing one -- same reasoning as every other platform component in this project
+# (observability, model-serving, finops, sealed-secrets each got their own): one clearly-owned
+# namespace per platform component, never shared, so RBAC, NetworkPolicy and `kubectl -n <ns>`
+# all stay unambiguous about what belongs to this phase.
+#
+# pod-security.kubernetes.io/enforce: baseline, not restricted -- same "not verified against
+# this specific upstream chart's own securityContext on this project's real cluster yet"
+# reasoning every other namespace.yaml in this project already carries (observability,
+# model-serving, sealed-secrets). Kyverno's own admission webhook additionally needs to be
+# reachable by the API server before any other namespace's Pods can be admitted at all -- a
+# namespace this restrictive about its OWN pods failing to start would be a self-inflicted
+# cluster-wide outage, so this is deliberately not the namespace to experiment with tightening
+# first, even after a real install is confirmed.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyverno
+  labels:
+    app.kubernetes.io/part-of: polaris
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.34
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
