@@ -376,11 +376,23 @@ confirming independently that the signature verifies; (4) only then does Kyverno
 `kyverno-apply-policy`/`kyverno-status` can be confirmed on Darya at any time after `make
 cluster-up`, independently of steps 1–3, but `verify-demo` cannot.
 
-No rows below yet — nothing in this session has been run against a real GitHub Actions run or a
-real cluster. This section exists so the next real run's findings have a place to land, the same
-convention every other phase's troubleshooting section follows; it is not evidence this session
-skipped the "is a cluster/runner going to disagree with me" question, only that the answer is not
-known yet because the first command that could surface a disagreement has not been run for real.
+**One real target-machine finding so far, 2026-10-15 — `kyverno-install`, not signing/the policy
+itself:**
+
+| Symptom | Likely cause | Fix | Confirm |
+|---------|--------------|-----|---------|
+| First `make kyverno-install` left the Helm release stuck in `pending-install`, with `admission-controller`/`background-controller`/`cleanup-controller` in `CrashLoopBackOff`; a retry failed immediately with `another operation (install/upgrade/rollback) is in progress`; `kyverno-apply-policy` then failed with `no endpoints available for service "kyverno-svc"` *(confirmed, target machine, 2026-10-15)* | Each crashing controller's own logs (`kubectl describe pod`'s `Last State`, since `logs --previous` 404'd on the already-completed init container) showed a clean, non-panicking pattern: acquire a leader-election `Lease`, run normally for 20s–4min, then fail to **renew** it with `context deadline exceeded` against `https://10.43.0.1:443` and shut down gracefully (exit 0). `kubectl top nodes`/`describe nodes` ruled out node CPU/memory/pressure as the cause (2-6% CPU, no `MemoryPressure`/`DiskPressure`/`PIDPressure`) — so this was never simple resource contention from the rest of the cluster, as first suspected. A 20-call `time kubectl get leases` loop did catch 3 consecutive real latency spikes (1.3s→1.8s→2.7s) against an otherwise-clean ~0.5s baseline, confirming the API server really does have periodic multi-second hiccups on this machine. Separately, `journalctl -u kubelet` turned up an **unrelated, pre-existing problem**: a leftover kubeadm-based `kubelet.service` (from `kubeadm`/`kubectl`/`kubelet`/`kubernetes-cni` apt packages, unrelated to k3d, most likely from earlier CKA/LFS258 lab work) had been `enabled` and crash-looping every ~9-10s for 1000+ restarts, fatally, with `running with swap on is not supported, please disable swap or set --fail-swap-on flag to false`. This is a real, separate bug and was disabled (`sudo systemctl disable --now kubelet`) on its own merits. **Honestly, though: the timeline does not support pinning the original crash-loop on it** — the second, successful `kyverno-install` was already running cleanly (and stayed at 0 restarts for the next ~40+ minutes) *while that kubelet.service was still actively crash-looping, undiscovered*. The most likely explanation for the first attempt's failure remains a one-off latency burst specific to that install's own moment (CRDs + 4 controllers + webhook registration all at once), not a sustained systemic cause this session fully isolated | Cleared the stuck release (`helm uninstall kyverno -n kyverno --no-hooks`) and re-ran `make kyverno-install` plain, no config change — it succeeded on the first attempt and has stayed healthy since. Disabled the unrelated leftover kubelet.service as separate, deserved cleanup, not as "the fix" | **Confirmed, target machine, 2026-10-15** — `kubectl get pods -n kyverno` showed all four controllers `1/1 Running`, `RESTARTS: 0`, `AGE: 101m` — spanning a window that includes ~40 minutes during which the leftover kubelet.service was still crash-looping, undisabled. `KYVERNO_CHART_VERSION` pinned to `3.9.1` in `versions.env`, resolved the same way every other chart version in this project was (a real `helm upgrade --install` on the target machine, read from its own warning) |
+
+This is the first phase where a finding's cause could not be fully pinned down even after real
+target-machine evidence — recorded honestly as "most likely a transient install-time burst,
+not confirmed" rather than overclaiming the kubelet fix as the explanation just because it was
+the thing found and disabled in between. If `kyverno-install` ever crash-loops again on a future
+attempt with the stray kubelet already gone, that would be real evidence against the "transient
+burst" explanation and worth a fresh row here.
+
+Nothing below this point has been run against a real GitHub Actions run yet — the four-step
+signing/verification sequence above (push → real CI run signs → `cosign-verify` → `kyverno-
+verify-demo`) still has no real digest to work with.
 
 One thing worth naming here rather than only in `docs/security/admission-policy.md` §3: even a
 fully successful real run through all four steps above would **not** mean `polaris-dev` itself is

@@ -7,23 +7,22 @@
 # with this repo's own real owner/repo and applies it directly from stdin, never from a file on
 # disk (see that template's own header comment for exactly why).
 #
-# KYVERNO_CHART_VERSION is deliberately left unpinned in versions.env (see its own Phase 15
-# comment) — `install` below installs without --version, then prints the version Helm actually
-# resolved, to be pinned deliberately in a follow-up commit once a real target-machine install
-# confirms it, the same two-step sealed-secrets.sh/finops.sh/observability.sh already used.
+# KYVERNO_CHART_VERSION was left unpinned in versions.env until a real target-machine install
+# resolved it, the same two-step sealed-secrets.sh/finops.sh/observability.sh already used — now
+# pinned to 3.9.1, confirmed via Darya's own `helm list` on 2026-10-15 (see versions.env's own
+# comment and docs/troubleshooting.md's Phase 15 session 2 section for the install-stability
+# finding from that same run).
 #
 # Usage: scripts/bootstrap/kyverno.sh <install|status|apply-policy|verify-demo|uninstall> [args]
 # Normally invoked through the make targets (make kyverno-install, ...).
 #
-# Status: written and shellchecked in the sandbox, where every values key this script's values
-# file sets was confirmed for real against the chart's own templates (see
-# deploy/platform/kyverno/kyverno-values.yaml's own comments) — but there is no cluster and no
-# `helm` in the sandbox (same constraint every previous phase's bootstrap/deploy script has
-# carried). `install`/`status`/`apply-policy`/`uninstall` against a real cluster are the
-# target-machine verification step. `verify-demo` additionally needs a REAL signed image digest
-# as input — which only exists after a real GitHub Actions run of the updated ci.yml has
-# actually signed one (ADR-35) — so it is sequenced after that run, not after a plain cluster-up,
-# unlike every other command here.
+# Status: `install`/`status` confirmed on the target machine, 2026-10-15 (all four controllers
+# stable, 0 restarts over 101 minutes — docs/troubleshooting.md has the full finding, including
+# an unrelated leftover kubeadm kubelet.service found and disabled along the way). `apply-policy`
+# has not yet been re-attempted since the clean reinstall. `verify-demo` additionally needs a REAL
+# signed image digest as input — which only exists after a real GitHub Actions run of the updated
+# ci.yml has actually signed one (ADR-35) — so it is sequenced after that run, not after a plain
+# cluster-up, unlike every other command here.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

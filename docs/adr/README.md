@@ -1037,9 +1037,16 @@ registry or environment that cannot reach Fulcio/Rekor's public endpoints.
 
 ### ADR-36: Kyverno `ClusterPolicy` verifies Cosign signatures for `ai-service` images
 
-Status: accepted; written and shellchecked in the sandbox, 2026-10-15 — not yet confirmed on the
-target machine (no cluster in the sandbox this was written in); sequenced after ADR-35's own
-real-signature confirmation, since `verify-demo` needs a real signed digest as input.
+Status: accepted. `kyverno-install`/`kyverno-status` confirmed on the target machine, 2026-10-15
+— all four controllers (`admission`/`background`/`cleanup`/`reports`) `1/1 Running`, `RESTARTS: 0`
+over a 101-minute window; `KYVERNO_CHART_VERSION` pinned to `3.9.1` from that run's own `helm
+list`. See `docs/troubleshooting.md`'s session 2 section for the real install-stability finding
+(a first attempt crash-looped; the second succeeded cleanly and has stayed healthy since, cause
+not fully isolated — recorded honestly as "most likely a transient install-time burst", not
+overclaimed). `apply-policy`/`verify-demo` are still **not** confirmed: `verify-demo` needs a
+real signed digest from ADR-35's own real-signature confirmation (push → real CI run → `cosign-
+verify`), which has not happened yet; `apply-policy` just hasn't been re-attempted since the
+clean reinstall.
 
 Context: a signature nobody ever checks is a claim, not an enforced guarantee. `docs/
 architecture.md`'s Phase 15 "Done when" line names "admission policy" as the fourth and last of
