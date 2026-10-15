@@ -90,16 +90,14 @@ gateway:
   # deploy/platform/gateway/api-keys.dev.example.json for the format). Left at the chart's own
   # "{}" default here deliberately -- a real tenant/key map does not belong in a committed
   # values file even for a local-only demo (see ADR-30).
+  #
+  # Phase 15 / ADR-33: real ciphertext from `make gateway-seal ENV=dev` against Darya's own
+  # sealed-secrets controller, 2026-10-14. Lives inside THIS existing gateway: block
+  # deliberately, not as a second top-level gateway: key -- see docs/troubleshooting.md's
+  # Phase 15 section for why that would have silently broken gateway.enabled.
+  apiKeysSealed: "AgBkwFh1xwMaaRxQOSmce/VYLJqcx0sKDKcFRcAmVC1P5I19JOCJUXSd4uqmx6B+ejIk+ZbdGRY5j3ok1YjmGUy8kRPBMlJnsc5jOovVMFLWQ5n1RcRruED92zaWonf9Ynb6IuGgi4bUIsLnDBaXV0m6JSGenvB7E8bGP6RsX9pyEUcr11cM/NoqcVjGhkwhZjA4CLOiBphmqeOanH1ys9bK8zTcLSl403wT+IOiCS/gIKBhPhnQumZAa2qgOUmazAxjkbCMxTn1G3ss3pQY7C+uFuekhqsSLFKsrXq26cNgyTRbwVImnXniaJuTr795/v2SmYxghkDiff56ldKHc5oiN8h7rr0djMuymio4ISzN1CFSLk+yhsANVebojzLHH5UHE13DFV38//zs5H0DSc7+HpZ+tIwTWzyelmzFc7sZOjykl0lYSfXx6bjRPmjbB13H8KtNhEd8y4p9y3xOPC4OavcsuFAcMQUnBMIXsontI3BOXMDSE253qhw/T/iVmm33yGfM2CqgOtfbjvoclHTmHroUy02NVfClk2CLBcpj0H5MF0n5xIoNs+DohY6Lwpp4WRWANOoVomcrDaStrkRprskv4MS0Rpu81zFkGSgtbSrHQ9zS4Qq13jJ4rPmu5ru/eozhW7K+eli4r4Jr6oD1JPfKHtf9U+/iqpoboBPpq4HaxItwcoXx/l0lQd4mxgqs6SkyaJ6VYEo7gVTQkXsYaAKiTsG9+df4rRMMJ7yI2fyBqlbrHcTi7id+iqSRjUKZu4BPlp/+upkRGsL/+I05ckvPblfvFd/Y7bYbP4RfK2E+kYh2g4Q6w/9ZEaCoIcs6bnhsPjwPNJeJjPo/0/OUXX2FAZ3fazFr7wxaNSBVUQ3rcCikDbevqafMHV98sEkYnpPevS60HQ=="
 
-# Phase 15 / ADR-33: NOT turned on yet, deliberately. Flipping this on is a two-step, real,
-# target-machine action -- not a sandbox edit -- so it is left as instructions here rather than
-# live YAML until both steps have actually been done against Darya's own cluster:
-#   1. make sealed-secrets-install   (installs the controller into its own namespace)
-#   2. make gateway-seal ENV=dev     (runs scripts/deploy/seal-gateway-secret.sh against that
-#                                      real controller; prints a ciphertext)
-# Only then, uncomment and fill in both lines below with that script's real output (never a
-# value typed from guesswork -- a wrong ciphertext fails closed at the controller, not subtly):
-# sealedSecrets:
-#   enabled: true
-# gateway:
-#   apiKeysSealed: "<paste scripts/deploy/seal-gateway-secret.sh's real output here>"
+# Phase 15 / ADR-34: sealed-secrets controller installed and this tenant key map re-sealed
+# against it for real on Darya, 2026-10-14.
+sealedSecrets:
+  enabled: true
