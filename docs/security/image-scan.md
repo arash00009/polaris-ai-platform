@@ -2,7 +2,7 @@
 
 The record of what the vulnerability scanner found in the AI service image, and what was decided about each finding. It exists so that "we scanned it" can be backed by dates, versions and reasons.
 
-**Status: one scan recorded (2026-09-21, image `0.3.0-ad9cae81814f`).** Nothing here is a result unless an entry below has a date and a scanner version. The vulnerability database changes daily, so an old entry describes that day only.
+**Status: two scans recorded (2026-09-21, image `0.3.0-ad9cae81814f`; 2026-10-26, image `0.4.0-b01eac000f28-dirty`).** Nothing here is a result unless an entry below has a date and a scanner version. The vulnerability database changes daily, so an old entry describes that day only.
 
 ## How to read and keep this register
 
@@ -62,3 +62,15 @@ The record of what the vulnerability scanner found in the AI service image, and 
 - Not done: the Trivy release and the image are not signature-verified or signed (cosign, Phase 15).
 
 Note: on 2026-09-21 the local commit history was rewritten (author email only; file contents unchanged). The image 0.3.0-ad9cae81814f above was built from commit ad9cae8, which is 8c4cab9 after the rewrite; the old hash no longer exists in the repository. Rebuild with make image-build to get a tag that matches the current history.
+
+### 2026-10-26: localhost:5000/polaris/ai-service:0.4.0-b01eac000f28-dirty
+
+- Scanner: Trivy 0.74.0, same pinned digest as the entry above (`sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`).
+- Base image: same `python:3.12-slim-trixie` digest as the entry above (`sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`) — unchanged; this entry is not a re-pin. Operating system reported by the scanner: Debian 13.7, 87 OS packages (same as before; the apt-get upgrade step below only bumps package versions already present, not the package count).
+- Context: this was the first real GitHub Actions run of `build-scan-deploy` to actually reach the Trivy step (Phase 15 session 2's `secrets-scan`/`deps-audit` fixes finally got it that far) — see `docs/troubleshooting.md`, Phase 15 session 2, for the full chain of findings that led here. That first real run failed: 4 of the HIGH findings below had an available fix (`openssl`/`libssl3t64`/`openssl-provider-legacy` 3.5.7-1~deb13u2 → 3.5.7-1~deb13u3, CVE-2026-84782; `libpcre2-8-0` 10.46-1~deb13u2 → 10.46-1~deb13u3, CVE-2026-103111), which `image-scan` correctly fails the build on. Fixed by adding an explicit `apt-get update && apt-get install --only-upgrade` step for those four named packages to the Dockerfile's runtime stage (not a `PYTHON_BASE_DIGEST` re-pin — no container registry access to attempt one for real from where this was written; see the Dockerfile's own comment for the tradeoff). This entry is the real, local re-scan on Darya that confirms the fix: tagged `-dirty` because it was run before the Dockerfile fix itself was committed.
+- Result: 0 CRITICAL, 44 HIGH, 58 MEDIUM, 61 LOW, 4 UNKNOWN (fixed and unfixed together). HIGH dropped from 48 to 44 and MEDIUM from 88 to 58 compared with the pre-fix run — exactly the 4 patched packages and whatever else `apt-get install --only-upgrade` pulled in to satisfy their own dependency versions.
+- Findings with a fix available: none (the fix above resolved all 4 from the failed run).
+- Accepted findings without a fix: the same 8 unique CVEs in 5 source packages as the 2026-09-21 entry above, unchanged in installed version, reasoning (Notes A and B above) and re-check condition — util-linux (CVE-2026-76642/78408/78409/78410), acl/libacl1 (CVE-2026-54369), ncurses (CVE-2025-69720), systemd (CVE-2026-16742), perl-base (CVE-2026-9538). Not re-transcribed here; nothing about them changed in this scan.
+- MEDIUM (58), LOW (61) and UNKNOWN (4) findings are counted, **not reviewed**.
+- SBOM: not generated for this scan (ran `make image-scan` directly, not the full CI job).
+- Not done: same as the entry above — Trivy itself and the image are not signature-verified or signed (cosign, Phase 15; see ADR-35/36 and `docs/security/image-signing.md` for that separate, still-in-progress chain).
