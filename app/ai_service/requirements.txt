@@ -1,5 +1,10 @@
 # Runtime dependencies, exact versions. Reproducible install: pip install -r requirements.txt
 # Resolved on 2026-09-21 with Python 3.12.3. Regenerate deliberately (see docs/deployment.md, Python section).
+# 2026-10-26: certifi and the opentelemetry-* core/instrumentation packages bumped to patch two
+# real CVEs pip-audit started flagging (PYSEC-2026-4320 / compromised emSign CA roots in certifi
+# before 2026.10.19; CVE-2026-114603 / ReDoS in opentelemetry-api's tracestate header parsing,
+# fixed in 1.45.1). See docs/troubleshooting.md, Phase 15 session 2, for the real pip-audit
+# output before/after.
 # Phase 9 (Observability) added prometheus-fastapi-instrumentator and the six opentelemetry-*
 # packages below it, and everything each one pulls in transitively. Every pre-existing pin above
 # that line is untouched. opentelemetry-instrumentation-httpx was deliberately left out: the
@@ -10,7 +15,7 @@ annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1
 asgiref==3.12.1
-certifi==2026.7.22
+certifi==2026.10.23
 charset-normalizer==3.5.1
 click==8.5.0
 fastapi==0.141.1
@@ -19,16 +24,16 @@ h11==0.16.0
 httpcore==1.0.9
 httpx==0.28.1
 idna==3.20
-opentelemetry-api==1.44.0
-opentelemetry-exporter-otlp-proto-common==1.44.0
-opentelemetry-exporter-otlp-proto-http==1.44.0
-opentelemetry-instrumentation-asgi==0.65b0
-opentelemetry-instrumentation-fastapi==0.65b0
-opentelemetry-instrumentation==0.65b0
-opentelemetry-proto==1.44.0
-opentelemetry-sdk==1.44.0
-opentelemetry-semantic-conventions==0.65b0
-opentelemetry-util-http==0.65b0
+opentelemetry-api==1.45.1
+opentelemetry-exporter-otlp-proto-common==1.45.1
+opentelemetry-exporter-otlp-proto-http==1.45.1
+opentelemetry-instrumentation-asgi==0.66b1
+opentelemetry-instrumentation-fastapi==0.66b1
+opentelemetry-instrumentation==0.66b1
+opentelemetry-proto==1.45.1
+opentelemetry-sdk==1.45.1
+opentelemetry-semantic-conventions==0.66b1
+opentelemetry-util-http==0.66b1
 packaging==26.3
 prometheus-fastapi-instrumentator==8.1.0
 prometheus_client==0.26.0

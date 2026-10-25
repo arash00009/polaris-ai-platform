@@ -26,3 +26,10 @@
 # scripts/build/gateway-image.sh:198 -- deliberately-wrong "wrong-key-entirely" value used by
 # cmd_check()'s own auth-contract smoke test to verify an unknown API key is rejected with 401.
 130b13cdb555d0bf03bdf8d38914cac1c5c05ef6:scripts/build/gateway-image.sh:curl-auth-header:198
+
+# docs/troubleshooting.md:406 -- self-inflicted: the first version of this file's own Phase 15
+# write-up quoted the fake "sk-acme-..." fixture above in full, which gitleaks (correctly, by
+# its own rules) flagged again here. De-fanged the wording in a later commit, but the string
+# still existed in this exact historical commit's diff, so it is ignored by fingerprint like
+# every other entry here rather than rewriting already-pushed history.
+fad595c0be0e044353aa9ec74c46b0dd9b569680:docs/troubleshooting.md:generic-api-key:406
