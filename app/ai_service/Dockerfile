@@ -51,6 +51,32 @@ ARG VERSION=0.0.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 
+# 2026-10-26: the first real CI run to reach this job (Phase 15 session 2's secrets-scan/
+# deps-audit fixes) found Trivy failing on 4 fixable HIGH findings in Debian packages already
+# installed in the PYTHON_BASE_DIGEST-pinned base layer: openssl/libssl3t64/
+# openssl-provider-legacy (CVE-2026-84782, fix 3.5.7-1~deb13u3) and libpcre2-8-0
+# (CVE-2026-103111, fix 10.46-1~deb13u3) -- see docs/troubleshooting.md, Phase 15 session 2.
+# The other ~44 HIGH findings Trivy reported that same run have no upstream fix yet ("no fix
+# yet" in its own output) and are not touched here -- image-scan only fails the build on a
+# fixable finding, by design (scripts/build/image.sh's cmd_scan).
+#
+# This is deliberately an explicit, visible apt-get upgrade of four named packages, not a
+# PYTHON_BASE_DIGEST re-pin: re-pinning needs pulling python:3.12-slim-trixie for real (`make
+# image-pin`) to see whether a newer published digest already carries these patches, which
+# neither this sandbox nor the one this Dockerfile was first written in can do (no container
+# registry access -- see this file's own header comment). Honesty about the tradeoff: unlike
+# the rest of this image, this one layer is NOT perfectly reproducible forever -- it installs
+# whatever Debian trixie's security repo has for these four packages at build time. Revisit
+# with a real `make image-pin` next time someone has registry access, and drop this RUN step
+# once a newer PYTHON_BASE_DIGEST bundles the fix on its own.
+RUN apt-get update \
+ && apt-get install --only-upgrade --no-install-recommends -y \
+      openssl \
+      libssl3t64 \
+      openssl-provider-legacy \
+      libpcre2-8-0 \
+ && rm -rf /var/lib/apt/lists/*
+
 # A dedicated, unprivileged user with a fixed numeric id. Kubernetes can only verify
 # "runAsNonRoot" for a numeric id (Phase 4). Also remove pip from the base image: nothing at
 # runtime installs packages, and a scanner (Phase 3, Trivy) reports fewer irrelevant findings.

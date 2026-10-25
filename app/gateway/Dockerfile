@@ -43,6 +43,21 @@ ARG VERSION=0.0.0
 ARG REVISION=unknown
 ARG CREATED=unknown
 
+# 2026-10-26: same fix, same reasoning, as app/ai_service/Dockerfile's identical RUN step --
+# this image shares the same PYTHON_IMAGE base and therefore the same 4 fixable Trivy findings
+# (CVE-2026-84782 in openssl/libssl3t64/openssl-provider-legacy, CVE-2026-103111 in
+# libpcre2-8-0). CI does not scan this image today (only app/ai_service's), so nothing caught
+# this one automatically -- fixed here anyway rather than leaving it for whenever that gap is
+# closed. See app/ai_service/Dockerfile's own comment for the full tradeoff (not a
+# PYTHON_BASE_DIGEST re-pin; this sandbox has no registry access to attempt one for real).
+RUN apt-get update \
+ && apt-get install --only-upgrade --no-install-recommends -y \
+      openssl \
+      libssl3t64 \
+      openssl-provider-legacy \
+      libpcre2-8-0 \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN /usr/local/bin/python -m pip uninstall -y pip \
  && groupadd --system --gid 10002 app \
  && useradd --system --uid 10002 --gid 10002 --no-create-home \
