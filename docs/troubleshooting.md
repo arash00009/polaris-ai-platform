@@ -390,9 +390,25 @@ the thing found and disabled in between. If `kyverno-install` ever crash-loops a
 attempt with the stray kubelet already gone, that would be real evidence against the "transient
 burst" explanation and worth a fresh row here.
 
+**Second real finding, 2026-10-25 — every real CI run since at least 2026-10-13 has been
+failing before signing even gets a chance to run, at an unrelated job:**
+
+The paragraph above was written assuming "no real CI run yet" simply meant nobody had pushed.
+That was wrong. `gh run list --workflow=ci.yml --limit 5` (2026-10-25) showed every one of the
+last several runs failed; `gh run view <id>` / `gh run view <id> --log-failed` on two of them
+showed the failure is in `secrets-scan` ("Secret scanning (gitleaks)"), not `build-scan-deploy`
+or `publish` — and because `publish` `needs: [... secrets-scan ...]`, it has never actually
+started in any run to date. The four-step signing/verification sequence has been blocked this
+whole time by a job that has nothing to do with signing.
+
+| Symptom | Likely cause | Fix | Confirm |
+|---------|--------------|-----|---------|
+| `make ci-secrets-scan` (the `Secret scanning (gitleaks)` CI job) fails with 4 findings on every run; `publish`/`build-scan-deploy` never start as a result | Direct inspection of all 4 flagged lines (`sed -n` on the exact file/line gitleaks reported) confirms every one is a fabricated test fixture, not a real secret: `"sk-acme-0123456789abcdef"` (`app/gateway/tests/test_finops_metrics.py:136`, `test_main.py:170`) and `"sk-globex-0123456789abcdef"` (`test_main.py:193`) are made-up API keys used by the gateway's own multi-tenancy tests to simulate a second/third tenant's credential; `"wrong-key-entirely"` (`scripts/build/gateway-image.sh`, inside `cmd_check()`'s own auth-contract smoke test) is a deliberately-invalid value used to prove an unknown key is rejected with 401. All 4 predate the Phase 15 Kyverno/Cosign work (commits dated Oct 5/7/13) | Added `.gitleaksignore` at the repo root, listing the exact `Fingerprint` (`commit:file:rule:line`) gitleaks itself printed for each of the 4 findings — not a path or rule exemption, so a real secret added anywhere else, including later in these same files, is still caught. No change to `scripts/ci/secrets-scan.sh`: `gitleaks detect` with no `--config`/`--gitleaks-ignore-path` flag already falls back to a `.gitleaksignore`/`.gitleaks.toml` at the scan root (`gitleaks detect --help`, "order of precedence") | **Confirmed in the sandbox only, 2026-10-25, not yet on a real GitHub Actions run** — installed the exact pinned version (`gitleaks 8.30.0`, matching `versions.env`'s `GITLEAKS_VERSION`) in a fresh clone of this repo (46 real commits of history) and ran the literal CI command, `make ci-secrets-scan`: before the ignore file, "leaks found: 4" with fingerprints matching the four above; after, "no leaks found", exit 0. Also confirmed the ignore list isn't a blanket pass: it is matched by exact fingerprint only. **Still needs the real test this project insists on for everything else** — push this, let a real Actions run execute the job, and only then update this row to "confirmed, target machine/CI" |
+
 Nothing below this point has been run against a real GitHub Actions run yet — the four-step
 signing/verification sequence above (push → real CI run signs → `cosign-verify` → `kyverno-
-verify-demo`) still has no real digest to work with.
+verify-demo`) still has no real digest to work with, and now also still needs a real CI run to
+get *past* `secrets-scan` for the first time.
 
 One thing worth naming here rather than only in `docs/security/admission-policy.md` §3: even a
 fully successful real run through all four steps above would **not** mean `polaris-dev` itself is

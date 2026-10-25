@@ -1,0 +1,28 @@
+# gitleaks ignore file -- see https://github.com/gitleaks/gitleaks#gitleaksignore
+#
+# Each line below is the exact Fingerprint gitleaks itself printed for a finding we have
+# directly inspected and confirmed is NOT a real secret: see docs/troubleshooting.md, Phase 15
+# session 2, "Secret scanning (gitleaks) false positives", for the investigation. These four
+# findings are fabricated test fixtures and one deliberately-wrong test value, all predating
+# the Phase 15 Kyverno/Cosign work, and have been silently failing CI's secrets-scan gate
+# (blocking build-scan-deploy and publish, and therefore every Cosign signing run) since.
+#
+# This file ignores findings by exact fingerprint only (commit:file:rule:line) -- it does not
+# exempt a file or a rule in general, so a real secret added anywhere, including later in these
+# same files, is still caught.
+
+# app/gateway/tests/test_finops_metrics.py:136 -- fake "sk-acme-..." API key simulating a
+# second tenant's credential in test_requests_from_different_tenants_are_kept_as_separate_series.
+392fcf6ae7a80a20c97bddbbbe22e85e9a61b76d:app/gateway/tests/test_finops_metrics.py:generic-api-key:136
+
+# app/gateway/tests/test_main.py:170 -- same fake "sk-acme-..." key, used the same way in
+# test_rate_limit_and_quota_are_per_tenant.
+130b13cdb555d0bf03bdf8d38914cac1c5c05ef6:app/gateway/tests/test_main.py:generic-api-key:170
+
+# app/gateway/tests/test_main.py:193 -- fake "sk-globex-..." API key for a third tenant in
+# test_tenant_limits_json_override_actually_changes_gateway_behaviour.
+05ae4838f60042c672f6d798d7b877df37cc5ade:app/gateway/tests/test_main.py:generic-api-key:193
+
+# scripts/build/gateway-image.sh:198 -- deliberately-wrong "wrong-key-entirely" value used by
+# cmd_check()'s own auth-contract smoke test to verify an unknown API key is rejected with 401.
+130b13cdb555d0bf03bdf8d38914cac1c5c05ef6:scripts/build/gateway-image.sh:curl-auth-header:198
