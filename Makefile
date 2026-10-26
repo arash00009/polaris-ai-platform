@@ -228,8 +228,8 @@ helm-logs-staging: ## Tail the staging release's pods' JSON logs (add ARGS=--fol
 helm-logs-prod: ## Tail the prod release's pods' JSON logs (add ARGS=--follow)
 	./scripts/deploy/helm.sh logs prod $(ARGS)
 
-helm-smoke-dev: ## Call the dev release through Traefik and check the /v1/chat contract
-	./scripts/deploy/helm.sh smoke dev
+helm-smoke-dev: ## Call the dev release through Traefik and check the /v1/chat contract (add ARGS=--ephemeral for CI's own throwaway cluster, never the real target machine)
+	./scripts/deploy/helm.sh smoke dev $(ARGS)
 
 helm-smoke-staging: ## Call the staging release through Traefik and check the /v1/chat contract
 	./scripts/deploy/helm.sh smoke staging

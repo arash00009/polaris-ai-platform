@@ -169,8 +169,13 @@ jobs:
       # scripts/deploy/helm.sh's cmd_apply and docs/troubleshooting.md, Phase 15 session 2.
       - name: Deploy to polaris-dev in the ephemeral cluster
         run: make helm-apply-dev ARGS=--ephemeral
+      # --ephemeral here must match the --ephemeral just above: cmd_apply provisioned the
+      # gateway with EPHEMERAL_DEMO_API_KEY (scripts/deploy/helm.sh), and cmd_smoke needs the
+      # same flag to know to authenticate with that same fixed, non-secret value instead of
+      # looking for a real deploy/platform/gateway/api-keys.dev.local.json this cluster never
+      # has.
       - name: Smoke test through Traefik (/healthz, /readyz, /v1/chat)
-        run: make helm-smoke-dev
+        run: make helm-smoke-dev ARGS=--ephemeral
 
       # The image that was just built, checked and scanned is saved here and re-loaded by the
       # publish job below — never rebuilt — so what reaches GHCR is byte-for-byte what this job

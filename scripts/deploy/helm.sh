@@ -72,6 +72,17 @@ CLUSTER_NAME="$(cluster_name_from_config "$CLUSTER_CONFIG")"
 CONTEXT="k3d-${CLUSTER_NAME}"
 INGRESS_PORT="$(host_port_for "$CLUSTER_CONFIG" 80)"
 
+# 2026-10-26: CI's own ephemeral cluster (ADR-24) never has a real
+# deploy/platform/gateway/api-keys.dev.local.json (gitignored, machine-local) -- cmd_apply's
+# --ephemeral already falls back to zero gateway API keys for that reason (gateway_api_keys_
+# json_for()'s own "{}" fallback), which is correct for a fresh checkout but means cmd_smoke's
+# own gateway auth check (POST /v1/chat with a 'demo' tenant key) has no key to use. This is a
+# fixed, non-secret value -- the ephemeral cluster is created and torn down inside a single CI
+# job and shares nothing with anything else -- so cmd_apply (which provisions it, --ephemeral
+# only) and cmd_smoke (which authenticates with it, --ephemeral only) just need to agree on the
+# same one, rather than reading it from a file neither of them has in CI.
+EPHEMERAL_DEMO_API_KEY="sk-ci-ephemeral-smoke-test-only-not-a-real-key"
+
 # A clearly-fake tag used only so `helm lint`/`helm template` can render without a real deploy
 # (the chart's `required` guard on image.tag would otherwise fail every lint run). It is never
 # used by `apply`, which always computes the real $TAG above. Reused as-is for
@@ -130,6 +141,18 @@ gateway_api_keys_json_for() {
     printf '{}' > "$fallback"
     printf '%s' "$fallback"
   fi
+}
+
+# 2026-10-26: --ephemeral's counterpart to gateway_api_keys_json_for() above -- a single
+# "demo" tenant key, EPHEMERAL_DEMO_API_KEY (defined with that constant, above), instead of
+# that function's zero-key "{}" fallback, so cmd_smoke's own gateway auth check has a real key
+# to authenticate with. Prints a path, same contract as gateway_api_keys_json_for(), for the
+# same --set-file reason documented there.
+ephemeral_demo_api_keys_file() {
+  local file
+  file="$(mktemp)"
+  printf '{"%s": "demo"}' "$EPHEMERAL_DEMO_API_KEY" > "$file"
+  printf '%s' "$file"
 }
 
 need_env() {
@@ -261,7 +284,13 @@ cmd_apply() {
       sealed_secrets_on="$(sealed_secrets_enabled_for "$env")"
     fi
     if [[ "$sealed_secrets_on" != "true" ]]; then
-      gateway_args+=(--set-file "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")")
+      local api_keys_file
+      if [[ "$ephemeral" == "true" ]]; then
+        api_keys_file="$(ephemeral_demo_api_keys_file)"
+      else
+        api_keys_file="$(gateway_api_keys_json_for "$env")"
+      fi
+      gateway_args+=(--set-file "gateway.apiKeysJson=$api_keys_file")
     fi
   fi
 
@@ -374,6 +403,17 @@ gateway_demo_api_key_for() {
 cmd_smoke() {
   need_kubectl
   local env="${1:-}"; need_env "$env"
+  shift || true
+  # --ephemeral: same meaning as cmd_apply's own flag, and it must be passed to both or not at
+  # all for a given ephemeral-cluster run -- see EPHEMERAL_DEMO_API_KEY's own comment, above.
+  local ephemeral=false
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --ephemeral) ephemeral=true ;;
+      *) die "Unknown argument '$arg'. Usage: $0 smoke <dev|staging|prod> [--ephemeral]" ;;
+    esac
+  done
   [[ -n "$INGRESS_PORT" ]] || die "No host port mapped to container port 80 in $CLUSTER_CONFIG"
   local host; host="$(host_for "$env")"
   [[ -n "$host" ]] || die "Could not read ingress.host from $CHART_DIR/values-$env.yaml"
@@ -388,7 +428,12 @@ cmd_smoke() {
   gateway_on="$(gateway_enabled_for "$env")"
   local auth_header=()
   if [[ "$gateway_on" == "true" ]]; then
-    local api_key; api_key="$(gateway_demo_api_key_for "$env")"
+    local api_key
+    if [[ "$ephemeral" == "true" ]]; then
+      api_key="$EPHEMERAL_DEMO_API_KEY"
+    else
+      api_key="$(gateway_demo_api_key_for "$env")"
+    fi
     [[ -n "$api_key" ]] || die "gateway.enabled is true for $env but no 'demo' tenant key was found in $GATEWAY_KEYS_DIR/api-keys.$env.local.json. See $GATEWAY_KEYS_DIR/api-keys.$env.example.json."
     auth_header=(-H "x-api-key: $api_key")
   fi
@@ -449,7 +494,7 @@ case "$CMD" in
   apply)     cmd_apply "${@:2}" ;;
   status)    cmd_status "${2:-}" ;;
   logs)      cmd_logs "${@:2}" ;;
-  smoke)     cmd_smoke "${2:-}" ;;
+  smoke)     cmd_smoke "${@:2}" ;;
   uninstall) cmd_uninstall "${2:-}" ;;
   *)
     echo "Usage: $0 <lint|template|apply|status|logs|smoke|uninstall> [dev|staging|prod] [--follow]" >&2
