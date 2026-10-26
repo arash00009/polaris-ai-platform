@@ -218,8 +218,10 @@ cmd_apply() {
   # values-dev.yaml's committed `gateway.apiKeysSealed` ciphertext is sealed against Darya's own
   # Sealed Secrets controller keypair specifically (`make gateway-seal`, 2026-10-14) and could
   # never decrypt against a fresh controller's own, different keypair in a new CI cluster every
-  # run. --ephemeral overrides both off for this one invocation instead -- see
-  # docs/troubleshooting.md, Phase 15 session 2, for the real CI failure this closes.
+  # run. --ephemeral overrides both off for this one invocation instead. It also forces
+  # config.POLARIS_BACKEND=mock, for the same underlying reason one layer further down the same
+  # chain -- see the comment right above where it is set, below. See docs/troubleshooting.md,
+  # Phase 15 session 2, for the real CI failures this closes.
   local ephemeral=false
   local arg
   for arg in "$@"; do
@@ -265,11 +267,28 @@ cmd_apply() {
 
   local -a ephemeral_args=()
   if [[ "$ephemeral" == "true" ]]; then
-    ephemeral_args=(--set "serviceMonitor.enabled=false" --set "sealedSecrets.enabled=false")
+    # 2026-10-26: values-dev.yaml also points ai-service at the Phase 11 model-serving Service
+    # (POLARIS_BACKEND=openai_compat, POLARIS_OPENAI_BASE_URL=http://ollama.model-serving...),
+    # which, like the Prometheus Operator and Sealed Secrets controller above, has only ever been
+    # installed on the persistent target-machine cluster (`make model-serving-install`), never in
+    # CI's own ephemeral one. /readyz calls the configured backend's check_ready() (main.py), so
+    # against a Service that does not exist there it never succeeds -- the Deployment never
+    # reports Available, and `helm upgrade --install --wait` times out after 120s with "context
+    # deadline exceeded", not a readable error naming the real cause. Forcing the chart's own
+    # "mock" backend (values.yaml's shared default, no external dependency, deterministic) for
+    # just this invocation is correct, not a reduced test: build-scan-deploy's job (ADR-24) is
+    # "the chart deploys and the API works", and the mock backend answers /v1/chat with the same
+    # response contract `cmd_smoke` already checks, same as a fresh checkout before model-serving
+    # is ever installed.
+    ephemeral_args=(
+      --set "serviceMonitor.enabled=false"
+      --set "sealedSecrets.enabled=false"
+      --set "config.POLARIS_BACKEND=mock"
+    )
   fi
 
   if [[ "$ephemeral" == "true" ]]; then
-    log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG, ephemeral-cluster overrides: serviceMonitor/sealedSecrets off)"
+    log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG, ephemeral-cluster overrides: serviceMonitor/sealedSecrets off, backend forced to mock)"
   else
     log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG)"
   fi
