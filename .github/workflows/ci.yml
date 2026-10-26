@@ -161,8 +161,14 @@ jobs:
       # staging/prod get the same chart and the same templates; what CI proves is "this chart
       # deploys and the API works", the same claim Phase 5's target-machine verification made for
       # all three, not a re-run of that claim for staging/prod on every commit.
+      # --ephemeral: this runner's own throwaway k3d cluster has never installed the Prometheus
+      # Operator or the Sealed Secrets controller (ADR-24 kept it deliberately lean), so
+      # values-dev.yaml's serviceMonitor.enabled/sealedSecrets.enabled: true fail outright here
+      # with missing-CRD errors -- and the committed apiKeysSealed ciphertext could never decrypt
+      # against a fresh controller's own different keypair in a new cluster anyway. See
+      # scripts/deploy/helm.sh's cmd_apply and docs/troubleshooting.md, Phase 15 session 2.
       - name: Deploy to polaris-dev in the ephemeral cluster
-        run: make helm-apply-dev
+        run: make helm-apply-dev ARGS=--ephemeral
       - name: Smoke test through Traefik (/healthz, /readyz, /v1/chat)
         run: make helm-smoke-dev
 

@@ -4,7 +4,9 @@
 # second, optional component of the same release (see gateway_enabled_for() below) -- still one
 # chart, one release per environment, not a second script.
 #
-# Usage: scripts/deploy/helm.sh <lint|template|apply|status|logs|smoke|uninstall> [dev|staging|prod] [--follow] [gateway]
+# Usage: scripts/deploy/helm.sh <lint|template|apply|status|logs|smoke|uninstall> [dev|staging|prod] [--follow] [gateway] [--ephemeral]
+# --ephemeral is apply-only (see cmd_apply's own comment) -- for CI's throwaway k3d cluster, never
+# the real target machine.
 # Normally invoked through the make targets (make helm-apply-dev, make helm-status-staging, ...).
 #
 # Status: written and shellchecked in the sandbox, where `helm` itself could not be installed
@@ -204,6 +206,28 @@ cmd_apply() {
   need_kubectl
   need_pushed
   local env="${1:-}"; need_env "$env"
+  shift || true
+  # 2026-10-26: --ephemeral is for CI's own throwaway k3d cluster (ADR-24) only -- the real
+  # target-machine `make helm-apply-dev` never passes it and is completely unaffected. That
+  # cluster is deliberately lean ("the chart deploys and the API works", not a full clone of
+  # the persistent target-machine cluster) and has never installed the Prometheus Operator or
+  # the Sealed Secrets controller, so values-dev.yaml's serviceMonitor.enabled/
+  # sealedSecrets.enabled: true (Phase 9, Phase 15/ADR-33) make `helm upgrade --install` fail
+  # outright with "no matches for kind ServiceMonitor/SealedSecret" -- those CRDs do not exist
+  # there. Installing the two controllers in CI just to satisfy this would not even be correct:
+  # values-dev.yaml's committed `gateway.apiKeysSealed` ciphertext is sealed against Darya's own
+  # Sealed Secrets controller keypair specifically (`make gateway-seal`, 2026-10-14) and could
+  # never decrypt against a fresh controller's own, different keypair in a new CI cluster every
+  # run. --ephemeral overrides both off for this one invocation instead -- see
+  # docs/troubleshooting.md, Phase 15 session 2, for the real CI failure this closes.
+  local ephemeral=false
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --ephemeral) ephemeral=true ;;
+      *) die "Unknown argument '$arg'. Usage: $0 apply <dev|staging|prod> [--ephemeral]" ;;
+    esac
+  done
   local ns; ns="$(namespace_for "$env")"
   local rel; rel="$(release_for "$env")"
 
@@ -212,12 +236,15 @@ cmd_apply() {
   # stays exactly as it was before this phase, with no new prerequisite.
   #
   # Phase 15 / ADR-33: the --set-file below is skipped once sealedSecrets.enabled is true for
-  # this environment. It is not merely redundant at that point -- values-<env>.yaml's own
-  # gateway.apiKeysSealed ciphertext is what templates/gateway-sealedsecret.yaml now renders,
-  # templates/gateway-secret.yaml's plain Secret stops rendering entirely (its own guard), and
-  # --set-file would still READ api-keys.$env.local.json off disk for a value nothing consumes
-  # -- harmless, but a needless read of a real tenant/key map for a code path that has become
-  # dead, which is itself worth not doing.
+  # this environment (or forced true-equivalent by --ephemeral above, which is not the case --
+  # --ephemeral forces it OFF, so the --set-file path below runs instead, same as a fresh
+  # checkout with no sealed-secrets controller at all). It is not merely redundant when the real
+  # value is true -- values-<env>.yaml's own gateway.apiKeysSealed ciphertext is what
+  # templates/gateway-sealedsecret.yaml now renders, templates/gateway-secret.yaml's plain
+  # Secret stops rendering entirely (its own guard), and --set-file would still READ
+  # api-keys.$env.local.json off disk for a value nothing consumes -- harmless, but a needless
+  # read of a real tenant/key map for a code path that has become dead, which is itself worth
+  # not doing.
   local -a gateway_args=()
   if [[ "$(gateway_enabled_for "$env")" == "true" ]]; then
     need_pushed_gateway
@@ -225,12 +252,27 @@ cmd_apply() {
       --set "gateway.image.repository=$GATEWAY_CLUSTER_REPO"
       --set "gateway.image.tag=$GATEWAY_TAG"
     )
-    if [[ "$(sealed_secrets_enabled_for "$env")" != "true" ]]; then
+    local sealed_secrets_on
+    if [[ "$ephemeral" == "true" ]]; then
+      sealed_secrets_on="false"
+    else
+      sealed_secrets_on="$(sealed_secrets_enabled_for "$env")"
+    fi
+    if [[ "$sealed_secrets_on" != "true" ]]; then
       gateway_args+=(--set-file "gateway.apiKeysJson=$(gateway_api_keys_json_for "$env")")
     fi
   fi
 
-  log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG)"
+  local -a ephemeral_args=()
+  if [[ "$ephemeral" == "true" ]]; then
+    ephemeral_args=(--set "serviceMonitor.enabled=false" --set "sealedSecrets.enabled=false")
+  fi
+
+  if [[ "$ephemeral" == "true" ]]; then
+    log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG, ephemeral-cluster overrides: serviceMonitor/sealedSecrets off)"
+  else
+    log_info "helm upgrade --install $rel ($env -> namespace $ns, image $CLUSTER_REPO:$TAG)"
+  fi
   # --force-conflicts: helm v4's default server-side apply otherwise fails outright whenever a
   # field (the image tag here; the gateway's checksum/secret annotation too) is already owned by
   # another field manager -- in dev that's "argocd-controller", since Phase 8 put polaris-dev
@@ -245,6 +287,7 @@ cmd_apply() {
     --set "image.repository=$CLUSTER_REPO" \
     --set "image.tag=$TAG" \
     "${gateway_args[@]}" \
+    "${ephemeral_args[@]}" \
     --namespace "$ns" --create-namespace \
     --force-conflicts \
     --wait --timeout 120s
@@ -384,7 +427,7 @@ CMD="${1:-}"
 case "$CMD" in
   lint)      cmd_lint ;;
   template)  cmd_template "${2:-}" ;;
-  apply)     cmd_apply "${2:-}" ;;
+  apply)     cmd_apply "${@:2}" ;;
   status)    cmd_status "${2:-}" ;;
   logs)      cmd_logs "${@:2}" ;;
   smoke)     cmd_smoke "${2:-}" ;;

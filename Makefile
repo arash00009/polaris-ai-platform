@@ -201,8 +201,8 @@ helm-template-staging: ## Render the chart for polaris-staging with the real com
 helm-template-prod: ## Render the chart for polaris-prod with the real computed image tag
 	./scripts/deploy/helm.sh template prod
 
-helm-apply-dev: ## helm upgrade --install the dev release (needs: cluster-up, image-build, image-push)
-	./scripts/deploy/helm.sh apply dev
+helm-apply-dev: ## helm upgrade --install the dev release (needs: cluster-up, image-build, image-push; add ARGS=--ephemeral for CI's own throwaway cluster, never the real target machine)
+	./scripts/deploy/helm.sh apply dev $(ARGS)
 
 helm-apply-staging: ## helm upgrade --install the staging release
 	./scripts/deploy/helm.sh apply staging
