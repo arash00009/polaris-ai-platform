@@ -1,8 +1,8 @@
 # Image scan register
 
-The record of what the vulnerability scanner found in the AI service image, and what was decided about each finding. It exists so that "we scanned it" can be backed by dates, versions and reasons.
+The record of what the vulnerability scanner found in the images this project builds, and what was decided about each finding. It exists so that "we scanned it" can be backed by dates, versions and reasons. Written for the AI service image only through Phase 3; extended below (2026-10-26) to also cover the gateway image, the first time `make gateway-image-scan` was ever run for real.
 
-**Status: two scans recorded (2026-09-21, image `0.3.0-ad9cae81814f`; 2026-10-26, image `0.4.0-b01eac000f28-dirty`).** Nothing here is a result unless an entry below has a date and a scanner version. The vulnerability database changes daily, so an old entry describes that day only.
+**Status: three scans recorded — AI service: 2026-09-21 (`0.3.0-ad9cae81814f`), 2026-10-26 (`0.4.0-b01eac000f28-dirty`); ai-gateway: 2026-10-26 (`0.1.0-1d9a84ba4d87`), the first ever.** Nothing here is a result unless an entry below has a date and a scanner version. The vulnerability database changes daily, so an old entry describes that day only.
 
 ## How to read and keep this register
 
@@ -74,3 +74,19 @@ Note: on 2026-09-21 the local commit history was rewritten (author email only; f
 - MEDIUM (58), LOW (61) and UNKNOWN (4) findings are counted, **not reviewed**.
 - SBOM: not generated for this scan (ran `make image-scan` directly, not the full CI job).
 - Not done: same as the entry above — Trivy itself and the image are not signature-verified or signed (cosign, Phase 15; see ADR-35/36 and `docs/security/image-signing.md` for that separate, still-in-progress chain).
+
+## ai-gateway
+
+The gateway image (Phase 12) has its own `make gateway-image-scan` (`scripts/build/gateway-image.sh`'s `cmd_scan`, identical logic to the AI service's `cmd_scan`) and was confirmed working on the target machine back in Phase 12 (2026-10-05–07) — but no scan result was ever recorded here; this register's own title and scope, until now, only mentioned the AI service image. The entry below is the first ever recorded, run on Darya right after the same `apt-get install --only-upgrade` CVE fix (2026-10-26, see the AI service entry above and `docs/troubleshooting.md`'s Phase 15 session 2 section) was added to `app/gateway/Dockerfile` — to confirm, rather than assume, that the identical fix on the identical base image produces the identical result for this image too.
+
+### 2026-10-26: localhost:5000/polaris/ai-gateway:0.1.0-1d9a84ba4d87
+
+- Scanner: Trivy 0.74.0, same pinned digest as the AI service entries above (`sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969`).
+- Base image: same `python:3.12-slim-trixie` digest as the AI service entries above (`sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`) — the gateway's own `Dockerfile` deliberately mirrors the AI service one closely (one reviewed security posture for every image in this repo, not two; see `app/gateway/Dockerfile`'s own header comment). Operating system reported by the scanner: Debian 13.7, 87 OS packages — same count as the AI service image, as expected from the same base layer.
+- Context: run on Darya via `make gateway-image-build && make gateway-image-check && make gateway-image-scan && make gateway-image-sbom`, directly in response to `docs/troubleshooting.md`'s "Fourth real finding" (`build-scan-deploy` never built the gateway image, so `helm-apply-dev` failed in a real CI run) — this scan was run to confirm, before relying on CI to find out, that the gateway's own `apt-get install --only-upgrade` fix (added the same day as the AI service one, same four packages, same base image) actually produces the same result rather than assuming it from analogy alone.
+- Result: 0 CRITICAL, 44 HIGH, 58 MEDIUM, 61 LOW, 4 UNKNOWN (fixed and unfixed together) — identical severity counts to the AI service's 2026-10-26 entry above, package for package (`bsdutils`/`libblkid1`/`liblastlog2-2`/`libmount1`/`libsmartcols1`/`libuuid1`/`login`/`mount`/`util-linux`, `libacl1`, `libncursesw6`/`libtinfo6`/`ncurses-base`/`ncurses-bin`, `libsystemd0`/`libudev1`, `perl-base` — the same 8 unique CVEs as Notes A and B in the 2026-09-21 AI service entry above).
+- Findings with a fix available: none — the fix worked here too, confirmed rather than assumed: `[ ok ] no HIGH/CRITICAL finding with an available fix` from the real run on Darya.
+- Accepted findings without a fix: the same 8 unique CVEs in 5 source packages as the AI service entries above, for the same reasons (Notes A and B there apply unchanged — the gateway runs as uid 10002 with the same hardened posture: `no-new-privileges`, all capabilities dropped, read-only root filesystem, and calls none of `mount`/`nsenter`/`login`/`infocmp`/`systemd-homed`/`Archive::Tar` either). Not re-transcribed here.
+- MEDIUM (58), LOW (61) and UNKNOWN (4) findings are counted, **not reviewed**.
+- SBOM: `artifacts/sbom-gateway-0.1.0-1d9a84ba4d87.cdx.json`, CycloneDX 1.7, 130 components. Not committed (`artifacts/` is git-ignored).
+- Not done: same as the AI service entries above — not signature-verified or signed (Cosign, Phase 15; the `publish`/signing chain in ADR-35/36 covers only the AI service image today — the gateway image is never pushed to GHCR or signed by any CI job, a separate, undocumented-until-now scope gap worth a line in `docs/troubleshooting.md` if it matters for this portfolio, but out of scope for the `build-scan-deploy` fix this scan was run to verify).

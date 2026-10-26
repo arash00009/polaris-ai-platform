@@ -135,6 +135,25 @@ jobs:
       - name: Push the image to the ephemeral cluster's own local registry
         run: make image-push
 
+      # 2026-10-26: this job built/scanned/pushed only the ai-service image from the day this
+      # workflow was written (Phase 6), before Phase 12 added ai-gateway. `helm-apply-dev` below
+      # has needed the gateway image ever since (gateway.enabled is true for dev — see
+      # scripts/deploy/helm.sh's need_gateway_tag()) and every real CI run before this one never
+      # got far enough to expose the gap: it always failed earlier, on secrets-scan/deps-audit/
+      # Trivy (see docs/troubleshooting.md, Phase 15 session 2). This is the fix, mirroring the
+      # ai-service steps above one for one — see docs/troubleshooting.md for the real failure
+      # this closes.
+      - name: Build the gateway image
+        run: make gateway-image-build
+      - name: Gateway hardened-container check (non-root, probes, auth contract, JSON logs)
+        run: make gateway-image-check
+      - name: Gateway Trivy scan (fails on fixable HIGH/CRITICAL — see docs/security/image-scan.md)
+        run: make gateway-image-scan
+      - name: Gateway SBOM (CycloneDX)
+        run: make gateway-image-sbom
+      - name: Push the gateway image to the ephemeral cluster's own local registry
+        run: make gateway-image-push
+
       - name: helm lint (structure check, all three values files)
         run: make helm-lint
       # Only polaris-dev is deployed and smoke-tested here — docs/architecture.md's roadmap calls
