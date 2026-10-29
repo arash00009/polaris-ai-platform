@@ -460,6 +460,22 @@ This closes out every gap this session's `--ephemeral` work opened one layer at 
 
 What is **not yet confirmed** is the other half of ADR-35/36: that the published signature actually verifies with `cosign verify` pinned to the real certificate identity/OIDC issuer (`make cosign-verify`), and that a Kyverno `verifyImages` policy pointed at this same digest actually admits a signed image and rejects an unsigned one (`make kyverno-verify-demo`). Both need the real digest above and a real cluster (Darya's, not the sandbox's) — see the next finding once that is run.
 
+**Ninth real finding, 2026-10-29 — `make cosign-verify` passed on the first try; `make kyverno-verify-demo` did not, and the real cause was neither the cluster nor the signature:**
+
+`make cosign-verify DIGEST=...` against the run-`40250439366` digest passed cleanly on Darya — the first real confirmation that a Cosign keyless signature from this project's own CI actually verifies against the certificate identity, Rekor transparency log, and Fulcio-chained certificate (`docs/security/image-signing.md`'s target-machine step, closed out). `make kyverno-verify-demo` against the exact same digest did not: `verify-cosign-keyless: '... .attestors[0].entries[0].keyless: no signatures found'`.
+
+Three candidate causes, each eliminated by a real test rather than assumed away:
+
+| Candidate cause | Test | Result |
+|---|---|---|
+| Stale/crash-looping Kyverno pods (all four showed `0/1 Completed`/`Unknown`, dozens of restarts, a `kube-root-ca.crt not registered` mount error — real but unrelated drift after several days uptime on a laptop that sleeps) | `k3d cluster stop polaris && k3d cluster start polaris`, waited for `1/1 Running`, re-ran `kyverno-verify-demo` | Same failure, same message, on a verified-healthy admission-controller pod — ruled out |
+| NetworkPolicy/DNS blocking the `kyverno` namespace from reaching `ghcr.io` | One-off debug pod (`curlimages/curl`, with a `securityContext` satisfying the namespace's `restricted` Pod Security Standard) run inside the `kyverno` namespace, `curl -v https://ghcr.io/v2/` | Full TLS handshake, HTTP/2, the normal unauthenticated `401` challenge — identical to Darya's own host. Ruled out |
+| Kyverno's vendored cosign/sigstore library too old to know about OCI 1.1 referrers lookup | Read Kyverno v1.19.1's real `go.mod` from its GitHub source | Pins `github.com/sigstore/cosign/v3` **v3.1.2** — essentially the same version as the `cosign` v3.1.3 CLI that verified cleanly. Ruled out |
+
+The real cause, found by reading Kyverno's actual source (not guessed): `pkg/image/verifiers/cpol/cosign/cosign.go`'s `buildCosignOptions()` sets `cosignOpts.ExperimentalOCI11 = opts.CosignOCI11` — a real `ClusterPolicy` field (`verifyImages[].cosignOCI11`, documented in `api/kyverno/v1/image_verification_types.go` as "enables the experimental OCI 1.1 behaviour ... Defaults to false"). GHCR does not implement the native OCI Referrers API (a direct `GET .../referrers/<digest>` returns `MANIFEST_UNKNOWN`, confirmed), so `cosign sign` correctly fell back to OCI 1.1's tag-based fallback scheme — a tag literally named `sha256-<digest>`, no `.sig` suffix, confirmed present with a raw, manually-negotiated anonymous-token registry request (`200`). A guessed `sha256-<digest>.sig` lookup (the pre-OCI-1.1 convention) got a clean `404` — that tag genuinely never existed, because `cosign sign` never created it. Standalone `cosign verify` auto-detects and checks the right tag by default. Kyverno's integration only does when `cosignOCI11: true` is set on the rule, which this project's policy template never had.
+
+**Fix**: added `cosignOCI11: true` to `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s `verifyImages[]` entry. See `docs/security/admission-policy.md` §6 for the full writeup. **Not yet confirmed by a real `make kyverno-verify-demo` run with the field applied** — `bash -n`, `python3 -c yaml.safe_load` on the rendered template, and `make lint`/`make test` (382/382) are clean in the sandbox; this is a real, persistent-cluster-only check (not CI-ephemeral — CI's own workflow never runs `kyverno-apply-policy`/`kyverno-verify-demo` at all), so only Darya can confirm it.
+
 One thing worth naming here rather than only in `docs/security/admission-policy.md` §3: even a
 fully successful real run through all four steps above would **not** mean `polaris-dev` itself is
 now protected by this policy — `polaris-dev`/`-staging`/`-prod` pull from `registry.localhost:

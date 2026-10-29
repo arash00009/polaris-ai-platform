@@ -52,6 +52,21 @@ spec:
             - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service:*"
             - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service@sha256:*"
           failureAction: Enforce
+          # 2026-10-29: real finding (docs/troubleshooting.md, Phase 15 session 2) -- GHCR does
+          # not implement the native OCI 1.1 Referrers API (confirmed: GET .../referrers/<digest>
+          # returns MANIFEST_UNKNOWN), so cosign (v3.1.3, both in CI's publish job and the
+          # standalone CLI on Darya) correctly falls back to OCI 1.1's "referrers tag schema" --
+          # a tag literally named sha256-<digest>, with NO .sig suffix -- confirmed present via
+          # a raw registry API call. Kyverno's own cosign integration (same cosign/v3 v3.1.2
+          # library, so this is not a version gap) only looks there when told to: see
+          # pkg/image/verifiers/cpol/cosign/cosign.go's buildCosignOptions(), which sets
+          # cosign.CheckOpts.ExperimentalOCI11 from exactly this field and defaults to false
+          # (api/kyverno/v1/image_verification_types.go: "CosignOCI11 ... Defaults to false").
+          # Without it Kyverno only ever checks the old sha256-<digest>.sig convention, which
+          # was never created against this registry -- hence "no signatures found" even though
+          # `make cosign-verify` (real run 40250439366's digest) verifies the exact same image
+          # cleanly. Not CI-ephemeral-specific: this is the real, persistent polaris-dev cluster.
+          cosignOCI11: true
           attestors:
             - count: 1
               entries:

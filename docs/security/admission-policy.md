@@ -94,3 +94,45 @@ signed digest as input, which only exists after `docs/security/image-signing.md`
 target-machine sequence (a real GitHub Actions run) has actually produced one. Confirming Kyverno
 installs cleanly does not, by itself, confirm the verification mechanism actually works — only
 `verify-demo`, run against a real signed digest, does that.
+
+## 6. Real finding, 2026-10-29 — `verify-demo` failed with "no signatures found" against a genuinely signed, `cosign verify`-clean image
+
+The first real `kyverno-verify-demo` run (digest from CI run `40250439366`, confirmed by
+`make cosign-verify` to carry a valid signature — certificate identity, Rekor transparency log
+entry, all checked) was rejected by the policy anyway: `verify-cosign-keyless: 'failed to verify
+image ...: .attestors[0].entries[0].keyless: no signatures found'`. Ruled out in order, each by a
+real test, not a guess: a crash-looping admission-controller pod (restarted the whole k3d node,
+re-ran — same failure on a healthy `1/1 Running` pod); a NetworkPolicy/DNS block (a one-off debug
+pod in the `kyverno` namespace reached `https://ghcr.io/v2/` with a full TLS handshake and the
+normal 401 challenge — no different from Darya's own host); and a Kyverno/cosign library version
+gap (Kyverno v1.19.1's own `go.mod`, read from its real GitHub source, pins `cosign/v3` v3.1.2 —
+essentially the same version as the `cosign` v3.1.3 CLI that verified the image cleanly).
+
+The real cause, found by reading Kyverno v1.19.1's actual source
+(`pkg/image/verifiers/cpol/cosign/cosign.go`'s `buildCosignOptions()`):
+
+```go
+cosignOpts.ExperimentalOCI11 = opts.CosignOCI11
+```
+
+`CosignOCI11` is a real, documented `ClusterPolicy` field
+(`api/kyverno/v1/image_verification_types.go`: `verifyImages[].cosignOCI11`, doc comment
+"enables the experimental OCI 1.1 behaviour in cosign image verification. Defaults to false").
+GHCR does not implement the native OCI 1.1 Referrers API (confirmed: `GET
+.../referrers/<digest>` returns `MANIFEST_UNKNOWN`), so `cosign sign` (same version, in CI)
+correctly fell back to OCI 1.1's "referrers tag schema" — a tag literally named
+`sha256-<digest>`, no `.sig` suffix — confirmed to exist with a raw, manually-negotiated
+registry API call (anonymous token + `GET` on that exact tag → `200`). Standalone `cosign
+verify` auto-detects and checks that tag by default, which is why it verified cleanly. Kyverno's
+own cosign integration only checks there when `cosignOCI11: true` is set on the rule; left
+unset (the project's original policy template never set it), it only ever looks for the old
+`sha256-<digest>.sig` tag — which this registry never had, because `cosign sign` never created
+it. `.sig` with a raw token-authenticated `GET` had already confirmed that tag does not exist
+(`404`), independently, before this source-level explanation was found.
+
+**Fix**: added `cosignOCI11: true` to `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s
+single `verifyImages[]` entry, right beside `failureAction`. This is not CI-ephemeral-specific —
+the real, persistent `polaris-dev` cluster on Darya is what this was tested against — and it is
+specific to this registry's lack of native Referrers API support, not something `--ephemeral`
+or any CI-only path needs to care about. Confirm column updated once a real `make
+kyverno-verify-demo` run passes with the field applied.
