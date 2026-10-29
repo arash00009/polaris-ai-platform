@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polaris-eval-harness"
+version = "0.1.0"
+description = "Polaris Phase 17 (ADR-38): golden-dataset evaluation harness for ai_service"
+requires-python = ">=3.12"
+# Direct dependencies only, with the lowest tested version -- same convention as
+# app/ai_service/pyproject.toml. No fastapi/pydantic/opentelemetry here: this is a client tool,
+# not a service, and genuinely needs neither.
+dependencies = [
+  "httpx>=0.28,<1",
+  "prometheus-client>=0.26,<1",
+]
+
+[project.scripts]
+eval-harness = "eval_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# golden_dataset.json lives at eval/golden_dataset.json (a sibling of src/, not inside the
+# eval_harness package) -- unlike ai_service/governance/manifest.json (ADR-37), it is never
+# shipped inside a container image, only ever run locally from a repo checkout
+# (make eval-run), so there is no package-data entry for it: cli.py's DEFAULT_DATASET finds it
+# by walking up from this file's own real on-disk location, not by import machinery.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["eval_harness"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "SIM", "C4", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]

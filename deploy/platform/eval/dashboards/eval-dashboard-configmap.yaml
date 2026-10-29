@@ -1,0 +1,144 @@
+# deploy/platform/eval/dashboards/eval-dashboard-configmap.yaml — Phase 17.
+#
+# The grafana_dashboard=1 label is what kube-prometheus-stack-values.yaml's
+# grafana.sidecar.dashboards config watches for (searchNamespace: ALL -- same as Phase 9/13's
+# own dashboard ConfigMaps). eval-dashboard.json is embedded verbatim as this ConfigMap's data
+# -- edit that file, not this one, and re-run 'scripts/bootstrap/pushgateway.sh
+# dashboard-configmap' (or 'make pushgateway-dashboard-configmap') to regenerate it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: eval-dashboard
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: polaris
+    grafana_dashboard: "1"
+data:
+  eval-dashboard.json: |
+    {
+      "title": "Polaris AI Evaluation",
+      "uid": "polaris-eval",
+      "description": "Phase 17 (ADR-38). Scores come from eval/golden_dataset.json's keyword-presence check (eval/src/eval_harness/scoring.py), pushed to a Prometheus Pushgateway (deploy/platform/pushgateway/) by a manual or scheduled 'make eval-run'. See docs/ai-evaluation.md for the full methodology and its named limitations.",
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "time": {
+        "from": "now-7d",
+        "to": "now"
+      },
+      "refresh": "30s",
+      "tags": ["polaris", "eval", "phase-17"],
+      "panels": [
+        {
+          "id": 1,
+          "title": "Read this before trusting a number on this dashboard",
+          "type": "text",
+          "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "**This is a keyword-presence heuristic, not a semantic understanding of correctness.** A response scores 1.0 only because the golden dataset's expected phrases appear in it as a case-insensitive substring (ADR-38) -- not because a judge (human or model) read the answer. **A Pushgateway holds only the *last* pushed value per backend** (`grouping_key={\"backend\": ...}`) until the next `make eval-run` -- the panels below show a flat line between runs, not continuous live traffic the way the other dashboards do; this is expected, not a stuck scrape. `mock` should score at (or very near) 1.0 every run -- a drop there means the harness itself broke, not that the model got worse (ADR-38: MockBackend's answers are a fixed lookup, not a measurement)."
+          }
+        },
+        {
+          "id": 2,
+          "title": "Mean eval score -- mock backend",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 4, "w": 12, "x": 0, "y": 4 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.5 },
+                  { "color": "green", "value": 0.95 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "polaris_eval_score{category=\"overall\", backend=\"mock\"}",
+              "legendFormat": "mock"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Mean eval score -- openai_compat backend (real model)",
+          "type": "stat",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "yellow", "value": 0.5 },
+                  { "color": "green", "value": 0.8 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "polaris_eval_score{category=\"overall\", backend=\"openai_compat\"}",
+              "legendFormat": "openai_compat ({{model_version}})"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "title": "Eval score per golden-dataset category",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "polaris_eval_score{category!=\"overall\"}",
+              "legendFormat": "{{backend}} / {{category}}"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "title": "Overall eval score by backend, prompt and model version",
+          "type": "timeseries",
+          "datasource": "Prometheus",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "max": 1
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "expr": "polaris_eval_score{category=\"overall\"}",
+              "legendFormat": "{{backend}} ({{model_version}} / prompt {{prompt_version}})"
+            }
+          ]
+        }
+      ]
+    }

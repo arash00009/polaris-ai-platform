@@ -1,0 +1,54 @@
+{
+  "_comment": "Polaris AI Platform golden evaluation dataset (Phase 17, ADR-38). Every prompt here deliberately matches one of MockBackend's own known-topic lookups (app/ai_service/src/ai_service/backends/mock.py's _TOPICS) and every expected_keywords entry is a real, verbatim substring of that backend's actual canned answer -- so a run against MockBackend is a deterministic regression check that should score at or near 1.0 forever (a canary for the harness itself breaking, not a measurement of anything interesting), while a run against OpenAICompatBackend's real, non-deterministic model output is the actually interesting score. Each topic appears twice, with different phrasing, to check that a rephrased question still gets a substantively correct answer rather than scoring the harness's ability to pattern-match one exact sentence. Prompts are written so they contain only their own topic's word (never another topic's), since MockBackend's lookup is first-match-wins over an ordered tuple -- a prompt containing both 'Pod' and 'Service', for instance, would silently score the Pod topic instead of the Service one. expected_keywords entries are matched as case-insensitive substrings (eval/src/eval_harness/scoring.py); a response's score is the fraction present, and a run's overall score is the mean across items -- the same 'mean evaluation score on the golden dataset' wording docs/architecture.md section 9's SLI table uses.",
+  "schema_version": 1,
+  "items": [
+    {
+      "id": "pod-1",
+      "category": "pods",
+      "prompt": "What is a Kubernetes Pod?",
+      "expected_keywords": ["smallest deployable unit", "containers"]
+    },
+    {
+      "id": "pod-2",
+      "category": "pods",
+      "prompt": "Explain what a Pod does in Kubernetes.",
+      "expected_keywords": ["smallest deployable unit", "ephemeral"]
+    },
+    {
+      "id": "deployment-1",
+      "category": "deployments",
+      "prompt": "What is a Kubernetes Deployment?",
+      "expected_keywords": ["ReplicaSets", "replicas"]
+    },
+    {
+      "id": "deployment-2",
+      "category": "deployments",
+      "prompt": "How does a Deployment roll out changes?",
+      "expected_keywords": ["ReplicaSets", "roll back"]
+    },
+    {
+      "id": "service-1",
+      "category": "services",
+      "prompt": "What does a Kubernetes Service do?",
+      "expected_keywords": ["stable virtual IP", "DNS name"]
+    },
+    {
+      "id": "service-2",
+      "category": "services",
+      "prompt": "How does a Service route traffic to healthy backends?",
+      "expected_keywords": ["stable virtual IP", "label"]
+    },
+    {
+      "id": "namespace-1",
+      "category": "namespaces",
+      "prompt": "What is a namespace in Kubernetes?",
+      "expected_keywords": ["logical partition", "RBAC"]
+    },
+    {
+      "id": "namespace-2",
+      "category": "namespaces",
+      "prompt": "Why would I use namespaces for multi-tenancy?",
+      "expected_keywords": ["logical partition", "multi-tenancy"]
+    }
+  ]
+}

@@ -1274,6 +1274,121 @@ function this project's own roadmap already anticipates MLflow for. Also revisit
 target-machine confirmation above actually happens — the same "real cluster is the only real
 proof" discipline every earlier Kubernetes-facing phase in this project has followed.
 
+### ADR-38: AI evaluation — a custom harness + golden dataset, not Langfuse; a Prometheus
+Pushgateway to carry batch eval scores, tagged with Phase 16's declared model/prompt version
+
+Status: accepted. Unit-tested in the sandbox; the Pushgateway Helm install and a real eval run
+against a live `ai_service` need a real cluster — this sandbox has no `helm` binary and no
+cluster. See `docs/ai-evaluation.md` §5 for exactly what is and is not yet confirmed.
+
+Context: `docs/architecture.md`'s Phase 0 roadmap names Phase 17's "Done when" line explicitly —
+"Golden dataset, evaluation scores tracked per prompt/model version, shown next to technical
+dashboards" — and section A4 names Langfuse self-hosted as the one "optional advanced feature"
+left open for this phase ("heavy: Postgres + ClickHouse + Redis"), with section 15's technology-
+selection table independently naming the same fork again ("AI evaluation | Custom harness +
+golden dataset (Langfuse optional)") and section 16's comparison table adding a third name,
+Arize Phoenix, as "a lighter option to evaluate" once there is "enough RAM after Tier 2." Section
+9's SLI table had already, in Phase 0, specified the exact metric this phase has to produce:
+"AI quality (Phase 17) | mean evaluation score on the golden dataset | ≥ baseline − tolerance" —
+and named it as a future input to Argo Rollouts analysis ("later eval score," section 8), which
+this ADR deliberately does not wire up yet (see Consequences).
+
+Decision:
+
+- **A custom harness + a git-tracked golden dataset, not Langfuse, and Phoenix not evaluated
+  either.** This project's own established bias against adding infrastructure without a
+  concrete, proven need — OpenCost over Kubecost (ADR-31), Sealed Secrets over Vault (ADR-33), a
+  Git-based manifest over MLflow (ADR-37) — applies here exactly as it did there. Langfuse
+  self-hosted needs Postgres, ClickHouse, Redis and object storage (`docs/architecture.md`
+  section 16's own line), which is disproportionate to what "Done when" actually asks for: a
+  golden dataset and a tracked score, not full LLM-tracing/human-review tooling. Phoenix is
+  named as lighter, but this project has exactly one golden dataset and no second team member to
+  review traces with, so there is no concrete need driving its evaluation either — left
+  genuinely untried rather than quietly ruled out, see Alternatives/Revisit when.
+- **JSON for the golden dataset (`eval/golden_dataset.json`), matching `ai_service/governance/
+  manifest.json`'s own precedent (ADR-37)** — one more small, git-tracked, machine-read
+  declarative file, kept in the same format as every other one in this project rather than
+  introducing YAML (and a new PyYAML dependency) for this one file alone.
+- **Keyword-presence scoring, not semantic similarity or an LLM-as-judge.** Each dataset item
+  carries `expected_keywords: list[str]`; a response's score is the fraction of those keywords
+  present as a case-insensitive substring, and a run's overall score is the mean across items —
+  deliberately the same wording as the SLI table's "mean evaluation score on the golden
+  dataset." An embedding-similarity metric would add a new model dependency (another thing to
+  download, version and justify); an LLM-as-judge would add a second model call per item whose
+  own correctness nobody is evaluating — the "who checks the checker" problem, not a solved one
+  at this project's scale. Keyword presence is the same style of check `test_mock_backend.py`
+  has used since Phase 2 (`"smallest deployable unit" in result.text`), now run against real,
+  non-deterministic model output instead of `MockBackend`'s fixed strings.
+- **One golden dataset, run against either backend.** The dataset's prompts are drawn from
+  `MockBackend`'s own existing known-topic lookup (Pods, Deployments, Services, namespaces) —
+  reusing real, already-curated prompt/keyword pairs rather than inventing a second set — so a
+  run against `MockBackend` is a deterministic regression check (expected to score at or near
+  1.0 forever, a canary for the harness itself breaking) while a run against `OpenAICompatBackend`
+  is the actually interesting, non-deterministic measurement.
+- **A Prometheus Pushgateway, not a write-endpoint added to `ai_service`.** "Evaluation scores
+  tracked per prompt/model version" means a value that persists between Prometheus scrapes even
+  though the harness that produces it is not a continuously-running, scrapeable process — this
+  is precisely the one case Prometheus's own documentation names the Pushgateway for ("exposing
+  metrics from batch jobs"), not the general-purpose relay anti-pattern it is in every other
+  case. The alternative — a new authenticated `POST` endpoint on `ai_service` that an external
+  harness calls to update an in-process `Gauge` — was rejected: it would add a write surface to
+  the serving path that Phase 12-15's own threat model (tenant auth, rate limiting, admission
+  policy) never anticipated, mixing "report an offline evaluation result" into a service whose
+  job is answering chat requests. The Pushgateway is a single, genuinely lightweight, stateless
+  upstream chart (`prometheus-community/prometheus-pushgateway`, the same Helm repo
+  `scripts/bootstrap/observability.sh` already adds for `kube-prometheus-stack` — no second repo
+  name needed) — confirmed against its real `values.yaml`: no persistent volume by default
+  (`persistentVolume.enabled: false`, an `emptyDir` instead — losing pushed metrics on a restart
+  is an accepted, named trade-off for a toy batch workload, not a surprise), and a
+  `serviceMonitor.honorLabels` default of `true`, which turns out to already be exactly the
+  setting this project needs: without it, Prometheus would overwrite the pushed `job`/`instance`
+  labels with its own scrape-target labels, silently destroying the one thing distinguishing one
+  eval run's pushed series from another's.
+- **The harness tags every pushed score with `model_version`/`prompt_version` read from the live
+  service's own `GET /v1/meta`, not hardcoded or re-derived.** This is Phase 16's governance
+  record doing the job ADR-37's own "Revisit when" line anticipated ("Phase 17 ... needs to join
+  evaluation scores to a specific prompt/model version") — the harness never needs its own
+  separate notion of which model/prompt is live, it asks the one source of truth that already
+  exists.
+- **Eval score as metric labels, not a per-run time series logged to Loki/Tempo.** `model_version`/
+  `prompt_version`/`backend` are a handful of distinct values each, the same bounded-cardinality
+  reasoning `docs/architecture.md` section 9's cardinality rule already applies to `tenant_id`/
+  `model`/`prompt_version` as metric labels — safe here for the identical reason.
+
+Alternatives: Langfuse and Arize Phoenix — see Decision above; neither is ruled out forever, see
+Revisit when. An LLM-as-judge scorer (a second model call grading the first's answer) — not
+used, see Decision above; could be added later as a second, clearly-labelled scoring method
+alongside keyword presence, not a replacement for it, since a cheap deterministic score should
+stay available even if a judge model is added. Writing eval results directly into the response
+body or a dedicated `ai_service` endpoint the way Phase 16's `/v1/meta` does — not used, because
+unlike governance (a static, per-deployment fact the service itself always knows), an eval score
+is produced by an external process running a whole dataset over many requests, which does not
+fit the "ask the service what it is" shape `/v1/meta` exists for.
+
+Consequences: a new top-level `eval/` directory (not inside `app/ai_service`, since this is a
+tool that calls the service, not part of the service itself) with its own `pyproject.toml`/
+`requirements.txt`/`Makefile` targets, mirroring `app/ai_service`'s own conventions;
+`eval/golden_dataset.json` and a pure, fully-unit-tested scoring function plus a thin CLI/IO
+wrapper that calls a live service's `/v1/chat` and `/v1/meta` and pushes to the Pushgateway
+(the same pure-function/IO-wrapper split ADR-37's `governance/__init__.py` used, for the same
+testability reason); a new `deploy/platform/pushgateway/` namespace/values/ServiceMonitor, a
+`scripts/bootstrap/pushgateway.sh` following `scripts/bootstrap/finops.sh`'s own shape, and new
+`versions.env` pins; a new Grafana panel reading the pushed `polaris_eval_score` metric. This
+phase deliberately does **not** wire the eval score into Argo Rollouts' `AnalysisTemplate` as a
+canary gate — `docs/architecture.md` section 8 names that as a later input ("later eval score"),
+and this project's progressive-delivery work (Phase 18) has not started yet; doing so here would
+be building ahead of its own roadmap the same way Phase 16 was warned against inventing
+MLflow-shaped features before Phase 17 proved they were needed.
+
+Revisit when: a second golden-dataset-like need appears that actually requires human review,
+trace-level debugging of a bad answer, or comparing many prompt variants side by side at once —
+the point where Langfuse's or Phoenix's own tracing UI would start earning its RAM cost over a
+JSON file and a Grafana panel; or when Phase 18 (progressive delivery) is ready to gate a canary
+on eval score, which is the real forcing function for turning this phase's batch-pushed metric
+into something an `AnalysisTemplate` can query live. Also revisit once the target-machine
+confirmation happens — the same "real cluster is the only real proof" discipline every earlier
+Kubernetes-facing phase in this project has followed.
+
 ## Template for a new record
 
 ```

@@ -1,0 +1,39 @@
+# deploy/platform/pushgateway/pushgateway-values.yaml -- Phase 17 (ADR-38). Written and checked
+# against the chart's own real values.yaml (prometheus-community/prometheus-pushgateway,
+# confirmed 2026-10-29 -- see versions.env's PUSHGATEWAY_CHART_VERSION comment); not yet
+# confirmed with a real `helm install` (this sandbox has no helm binary and no cluster).
+
+# serviceMonitor.enabled turns on the chart's own bundled ServiceMonitor. kube-prometheus-stack's
+# own values (deploy/platform/observability/kube-prometheus-stack-values.yaml) already set
+# serviceMonitorSelector/serviceMonitorNamespaceSelector to {} with
+# serviceMonitorSelectorNilUsesHelmValues: false -- Prometheus watches ServiceMonitors in every
+# namespace with no label restriction, so this chart's bundled one is picked up with no extra
+# release labels needed, the same way ai-service's/ai-gateway's/OpenCost's own ServiceMonitors
+# already are.
+serviceMonitor:
+  enabled: true
+  namespace: eval
+  # honorLabels is already the chart's own default (confirmed against its real values.yaml,
+  # 2026-10-29) -- set explicitly anyway so the reason is documented here, not left as an
+  # unexplained inherited default. Without it, Prometheus's own scrape-time relabeling would
+  # overwrite the `job`/`instance` labels the eval harness pushes (eval/src/eval_harness/
+  # pushgateway.py's grouping key) with the Pushgateway Pod's own target labels, destroying the
+  # one thing distinguishing one eval run's pushed series from another's -- see ADR-38.
+  honorLabels: true
+
+# No persistent volume: the chart's own default (persistentVolume.enabled: false, an emptyDir
+# instead). A restarted Pushgateway Pod loses every previously-pushed metric until the eval
+# harness runs again -- an accepted, named trade-off for a toy batch workload (ADR-38), not a
+# surprise discovered later. A real production use of this pattern would set
+# persistentVolume.enabled: true; this project's own golden-dataset eval run is cheap enough to
+# just re-run.
+persistentVolume:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 16Mi
+  limits:
+    cpu: 100m
+    memory: 32Mi

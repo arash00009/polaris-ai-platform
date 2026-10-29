@@ -508,3 +508,36 @@ Phase 16 section, ADR-37.
 | 4. Scale | Does not scale to A/B-testing two prompts or two model versions *concurrently* — the manifest only ever declares one "governed" version per backend at a time. Named explicitly in ADR-37's "Revisit when" as the condition that would reopen this decision. |
 | 5. Security | One fewer running service is one fewer thing to patch, expose, and secure — consistent with this project's "every piece of infrastructure needs a proven need" discipline already applied to OpenCost over Kubecost (ADR-31) and Sealed Secrets over Vault (ADR-33). |
 | 6. Cloud | A real production deployment comparing multiple concurrent model/prompt versions, or needing to join evaluation scores to a specific version (Phase 17's own named need), is exactly the forcing function that would make MLflow (or an equivalent experiment-tracking service) worth its operational cost — named as the reopening condition, not built pre-emptively. |
+
+## Phase 17
+
+Status: **unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
+`eval/`'s own test suite passes (44 tests, 99.15% coverage, `ruff check`/`ruff format --check`
+clean), and the harness was run for real against a locally-started `ai_service` (no cluster
+needed for that part), scoring a perfect 1.0 against `MockBackend` as designed. Not yet
+confirmed: a real `helm install` of the Prometheus Pushgateway, a real eval run against the
+Ollama-backed `polaris-dev` deployment, and the pushed `polaris_eval_score` metric actually
+appearing in Prometheus/Grafana — this sandbox has no `helm` binary and no cluster. Full record:
+`docs/ai-evaluation.md`, ADR-38.
+
+### Golden dataset + keyword-presence scoring harness
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Nothing before this phase gave this project a repeatable way to ask "is the AI still good, or just still up?" (`docs/architecture.md` section 6's own framing) — Phase 9-10's observability answers availability/latency, not answer quality, and nothing tracked a score against a specific model/prompt version at all. |
+| 2. Why | A small, git-tracked `eval/golden_dataset.json` (prompts + `expected_keywords`) plus a pure scoring function (`eval/src/eval_harness/scoring.py`): a response's score is the fraction of expected keywords present as a case-insensitive substring, and a run's mean score is `docs/architecture.md` section 9's SLI wording verbatim ("mean evaluation score on the golden dataset"). Every prompt matches one of `MockBackend`'s own known topics, with keywords checked programmatically against its real canned answers — so a run against the mock backend is a deterministic canary (expected ~1.0 forever), while a run against the real Ollama-backed backend is the actually interesting, non-deterministic number. |
+| 3. Failure | A malformed or incomplete `golden_dataset.json` (missing fields, duplicate ids, an empty `expected_keywords` list) fails fast with a specific `GoldenDatasetError`, caught by `eval/tests/test_dataset.py`'s own validation-path tests — never a silently-wrong, partially-loaded dataset. An unreachable `ai_service` or an unexpected response shape raises `ServiceClientError` and the CLI exits non-zero with a clear message, never a guessed score. |
+| 4. Scale | A second golden-dataset item is one more JSON object; a second backend to evaluate is one more `--backend` CLI invocation against the same dataset — the mechanism does not get more complex with more prompts or more backends. |
+| 5. Security | No new secret or credential surface — the dataset is plain, non-sensitive JSON, and the harness calls `ai_service` directly (no API key, same as Phase 16's own `/v1/meta` confirmation) since it is an internal measurement tool, not end-user traffic. |
+| 6. Cloud | The same "run a fixed prompt set, score the responses, track the score over time" shape is how Langfuse/LangSmith-style evaluation and CI-gated prompt regression testing work in production — this project's harness is the same idea at the scale a single golden dataset and no second reviewer actually need (ADR-38). |
+
+### Custom harness, not Langfuse/Phoenix; a Prometheus Pushgateway, not a write-endpoint on `ai_service`
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | `docs/architecture.md`'s own Phase 0 roadmap left this fork explicitly open for this phase ("Langfuse vs Phoenix vs custom evaluation view," section A4/16) — a golden-dataset score needs *some* tracing/visualization approach, and Langfuse is the named default candidate. Separately, "evaluation scores tracked" needs some way to persist a batch harness's output until Prometheus scrapes it. |
+| 2. Why | Langfuse self-hosted needs Postgres, ClickHouse, Redis and object storage (`docs/architecture.md` section 16) — disproportionate to what this phase's "Done when" line actually asks for (a golden dataset and a tracked score, not full tracing/human-review tooling) for a project with exactly one dataset and no second reviewer. A Prometheus Pushgateway is the textbook-correct tool for exposing a batch job's metric until the next scrape (Prometheus's own documented use case for it) — a single, genuinely lightweight, stateless chart from the same Helm repo already in use for `kube-prometheus-stack`, not a second monitoring stack. |
+| 3. Failure | Without `honorLabels: true` on the Pushgateway's `ServiceMonitor` (confirmed as the chart's own real default), Prometheus's scrape-time relabeling would silently overwrite the pushed `job`/`instance` labels with the Pushgateway Pod's own, destroying the one thing distinguishing one eval run's series from another's — named and set explicitly rather than left as an unexplained inherited default. With no persistent volume (also the chart's own default), a restarted Pushgateway Pod loses every previously-pushed score until the harness runs again — an accepted, named trade-off for a toy batch workload, not a surprise. |
+| 4. Scale | A Pushgateway holds only the *last* pushed value per grouping key (`backend`), not a history of every run — a real trend over many runs needs a scheduled job (not built this phase, named in ADR-38's "Revisit when"), not more Pushgateway capacity. |
+| 5. Security | A write-endpoint added to `ai_service` instead (the alternative this phase rejected) would have added an authenticated write surface to a serving path whose threat model (Phase 12-15's auth, rate limiting, admission policy) never anticipated one — the Pushgateway keeps that concern entirely outside the service. |
+| 6. Cloud | A real production deployment comparing many prompt variants, needing human review of individual answers, or wanting trace-level debugging of a bad response is exactly the forcing function that would make Langfuse's or Phoenix's own tracing UI worth its RAM cost — named as the reopening condition (ADR-38), not built pre-emptively. |

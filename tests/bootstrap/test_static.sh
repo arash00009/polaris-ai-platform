@@ -1796,5 +1796,128 @@ else
   bad "README.md's Phase 16 status row still says Planned (or the row is missing/reworded)"
 fi
 
+# --- Phase 17: AI evaluation (golden dataset, keyword-presence score, Pushgateway) -------------
+# eval/'s own pure-Python logic is fully exercised by its own pytest suite (44 tests, 99.15%
+# coverage) -- these checks only verify the sandbox-side shape: the dataset/harness files exist
+# and the dataset parses, and the Pushgateway/dashboard platform pieces are statically sane. A
+# real helm install and a real eval run against polaris-dev are this phase's target-machine step
+# -- this sandbox has no helm binary and no cluster; see docs/ai-evaluation.md section 6.
+
+# 140. the golden dataset and every eval_harness module exist, and the dataset parses as JSON
+EVAL_DIR_CHECK="eval"
+if [[ -f "$EVAL_DIR_CHECK/golden_dataset.json" ]] && python3 -c "import json, sys; json.load(open(sys.argv[1]))" "$EVAL_DIR_CHECK/golden_dataset.json" 2>/dev/null; then
+  ok "$EVAL_DIR_CHECK/golden_dataset.json exists and parses as valid JSON"
+else
+  bad "$EVAL_DIR_CHECK/golden_dataset.json is missing or does not parse as valid JSON"
+fi
+EVAL_SRC="$EVAL_DIR_CHECK/src/eval_harness"
+missing_eval_modules=""
+for f in dataset.py scoring.py runner.py client.py pushgateway.py cli.py; do
+  [[ -f "$EVAL_SRC/$f" ]] || missing_eval_modules+=" $f"
+done
+if [[ -z "$missing_eval_modules" ]]; then
+  ok "$EVAL_SRC has all six eval_harness modules"
+else
+  bad "$EVAL_SRC is missing:$missing_eval_modules"
+fi
+if [[ -f "$EVAL_DIR_CHECK/pyproject.toml" && -f "$EVAL_DIR_CHECK/requirements.txt" && -f "$EVAL_DIR_CHECK/requirements-dev.txt" ]]; then
+  ok "$EVAL_DIR_CHECK has pyproject.toml, requirements.txt and requirements-dev.txt"
+else
+  bad "$EVAL_DIR_CHECK is missing pyproject.toml, requirements.txt or requirements-dev.txt"
+fi
+
+# 141. deploy/platform/pushgateway/ parses as YAML and sets the two confirmed, real chart fields
+PG_DIR="deploy/platform/pushgateway"
+if [[ -f "$PG_DIR/namespace.yaml" && -f "$PG_DIR/pushgateway-values.yaml" ]]; then
+  ok "exists: $PG_DIR/namespace.yaml and pushgateway-values.yaml"
+else
+  bad "$PG_DIR is missing namespace.yaml or pushgateway-values.yaml"
+fi
+for f in "$PG_DIR/namespace.yaml" "$PG_DIR/pushgateway-values.yaml"; do
+  if [[ -f "$f" ]] && python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" "$f" 2>/dev/null; then
+    ok "$f parses as valid YAML"
+  else
+    bad "$f is missing or does not parse as valid YAML"
+  fi
+done
+if grep -q 'honorLabels: true' "$PG_DIR/pushgateway-values.yaml" 2>/dev/null; then
+  ok "pushgateway-values.yaml sets serviceMonitor.honorLabels: true (ADR-38 -- without it the pushed job/instance labels would be overwritten)"
+else
+  bad "pushgateway-values.yaml is missing serviceMonitor.honorLabels: true"
+fi
+
+# 142. the eval dashboard JSON is valid, and the ConfigMap's embedded copy matches it byte-for-byte
+# -- same drift check as check 67's ai-service-dashboard.json/finops-dashboard.json equivalents
+EVAL_DASHBOARD_JSON="deploy/platform/eval/dashboards/eval-dashboard.json"
+EVAL_DASHBOARD_CONFIGMAP="deploy/platform/eval/dashboards/eval-dashboard-configmap.yaml"
+if have python3 && [[ -f "$EVAL_DASHBOARD_JSON" && -f "$EVAL_DASHBOARD_CONFIGMAP" ]]; then
+  if EVAL_DASHBOARD_JSON="$EVAL_DASHBOARD_JSON" EVAL_DASHBOARD_CONFIGMAP="$EVAL_DASHBOARD_CONFIGMAP" python3 -c "
+import json, os, sys
+json_path = os.environ['EVAL_DASHBOARD_JSON']
+configmap_path = os.environ['EVAL_DASHBOARD_CONFIGMAP']
+with open(json_path) as f:
+    want = json.load(f)
+import yaml
+with open(configmap_path) as f:
+    doc = yaml.safe_load(f)
+got = json.loads(doc['data']['eval-dashboard.json'])
+sys.exit(0 if want == got else 1)
+"; then
+    ok "eval dashboard ConfigMap matches eval-dashboard.json (run 'make pushgateway-dashboard-configmap' if not)"
+  else
+    bad "eval dashboard ConfigMap has drifted from eval-dashboard.json -- run 'make pushgateway-dashboard-configmap'"
+  fi
+else
+  bad "$EVAL_DASHBOARD_JSON or $EVAL_DASHBOARD_CONFIGMAP is missing"
+fi
+
+# 143. scripts/bootstrap/pushgateway.sh exists, is executable, and implements the full subcommand set
+PG_SCRIPT="scripts/bootstrap/pushgateway.sh"
+if [[ -x "$PG_SCRIPT" ]] && grep -q 'cmd_install' "$PG_SCRIPT" && grep -q 'cmd_status' "$PG_SCRIPT" \
+  && grep -q 'cmd_dashboard_configmap' "$PG_SCRIPT" && grep -q 'cmd_uninstall' "$PG_SCRIPT"; then
+  ok "$PG_SCRIPT is executable and implements install/status/dashboard-configmap/uninstall"
+else
+  bad "$PG_SCRIPT is missing, not executable, or missing one of its subcommands"
+fi
+
+# 144. versions.env pins the Pushgateway chart repo/version
+if grep -q '^PUSHGATEWAY_HELM_REPO=' versions.env && grep -q '^PUSHGATEWAY_CHART_VERSION=' versions.env; then
+  ok "versions.env pins PUSHGATEWAY_HELM_REPO and PUSHGATEWAY_CHART_VERSION"
+else
+  bad "versions.env is missing PUSHGATEWAY_HELM_REPO or PUSHGATEWAY_CHART_VERSION"
+fi
+
+# 145. Makefile: the new Phase 17 targets exist
+for target in eval-install eval-lint eval-test eval-check eval-run \
+  pushgateway-install pushgateway-status pushgateway-dashboard-configmap pushgateway-uninstall; do
+  if grep -qE "^${target}:" Makefile; then
+    ok "Makefile target: $target"
+  else
+    bad "Makefile is missing target: $target"
+  fi
+done
+
+# 146. README.md / ADR / docs/ai-evaluation.md / docs/component-qa.md all gained Phase 17 material
+if grep -q 'ADR-38' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-38"
+else
+  bad "docs/adr/README.md is missing ADR-38 (AI evaluation)"
+fi
+if [[ -f docs/ai-evaluation.md ]]; then
+  ok "docs/ai-evaluation.md exists"
+else
+  bad "docs/ai-evaluation.md is missing"
+fi
+if grep -qi 'phase 17' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 17 section"
+else
+  bad "docs/component-qa.md is missing a Phase 17 section"
+fi
+if grep -E '^\| 17' README.md | grep -qvi 'planned'; then
+  ok "README.md's Phase 17 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 17 status row still says Planned (or the row is missing/reworded)"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

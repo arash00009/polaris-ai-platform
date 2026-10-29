@@ -10,6 +10,12 @@ GATEWAY_DIR  := app/gateway
 GATEWAY_VENV := $(GATEWAY_DIR)/.venv
 GATEWAY_PY   := $(GATEWAY_VENV)/bin/python
 
+# Phase 17 (ADR-38): eval/ is a tool that calls ai_service over HTTP, not a service itself --
+# same venv-per-component convention as APP_DIR/GATEWAY_DIR above.
+EVAL_DIR  := eval
+EVAL_VENV := $(EVAL_DIR)/.venv
+EVAL_PY   := $(EVAL_VENV)/bin/python
+
 # Phase 8: polaris-gitops is a separate repository (ADR-08); default to a sibling checkout next
 # to this one (~/polaris/polaris-gitops next to ~/polaris/polaris-ai-platform).
 GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
@@ -37,7 +43,9 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	tenants-smoke \
 	sealed-secrets-install sealed-secrets-status sealed-secrets-fetch-cert sealed-secrets-uninstall gateway-seal \
 	cosign-verify \
-	kyverno-install kyverno-status kyverno-apply-policy kyverno-verify-demo kyverno-uninstall
+	kyverno-install kyverno-status kyverno-apply-policy kyverno-verify-demo kyverno-uninstall \
+	eval-install eval-lint eval-test eval-check eval-run \
+	pushgateway-install pushgateway-status pushgateway-dashboard-configmap pushgateway-uninstall
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -416,3 +424,36 @@ kyverno-verify-demo: ## Prove the policy admits a real signed image and rejects 
 
 kyverno-uninstall: ## Remove the verify-ai-service-images policy and Kyverno itself
 	./scripts/bootstrap/kyverno.sh uninstall
+
+# --- Phase 17: AI evaluation (ADR-38) -----------------------------------------------------------
+$(EVAL_PY):
+	@echo "No Python virtualenv yet. Run: make eval-install" >&2; exit 1
+
+eval-install: ## Create the eval harness virtualenv and install the pinned dependencies
+	python3 -m venv $(EVAL_VENV)
+	$(EVAL_PY) -m pip install -r $(EVAL_DIR)/requirements-dev.txt
+	$(EVAL_PY) -m pip install --no-deps -e $(EVAL_DIR)
+
+eval-lint: $(EVAL_PY) ## Lint and format-check the eval harness (ruff)
+	$(EVAL_PY) -m ruff check $(EVAL_DIR)
+	$(EVAL_PY) -m ruff format --check $(EVAL_DIR)
+
+eval-test: $(EVAL_PY) ## Run the eval harness's own unit tests with coverage (fails below 95 %)
+	cd $(EVAL_DIR) && .venv/bin/python -m pytest --cov --cov-fail-under=95
+
+eval-check: eval-lint eval-test ## Lint and test the eval harness
+
+eval-run: $(EVAL_PY) ## Run the golden dataset against a live ai_service (set ARGS='--base-url http://127.0.0.1:8000 --backend mock', add --pushgateway-url to push)
+	cd $(EVAL_DIR) && .venv/bin/python -m eval_harness.cli $(ARGS)
+
+pushgateway-install: ## Install the Prometheus Pushgateway into its own eval namespace (needs: make cluster-up, make obs-install)
+	./scripts/bootstrap/pushgateway.sh install
+
+pushgateway-status: ## Show the Pushgateway's Helm release and pods
+	./scripts/bootstrap/pushgateway.sh status
+
+pushgateway-dashboard-configmap: ## Regenerate deploy/platform/eval/dashboards/eval-dashboard-configmap.yaml from eval-dashboard.json
+	./scripts/bootstrap/pushgateway.sh dashboard-configmap
+
+pushgateway-uninstall: ## Remove the Pushgateway and its dashboard ConfigMap
+	./scripts/bootstrap/pushgateway.sh uninstall
