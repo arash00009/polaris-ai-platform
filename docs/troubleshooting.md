@@ -478,7 +478,20 @@ The real cause, found by fetching the actual referrer content at the digest's fa
 
 Kyverno has a *separate*, correct code path for this exact format: `pkg/image/verifiers/cpol/cosign/sigstore.go`'s `fetchBundles()`, which filters referrers by `strings.HasPrefix(manifestDesc.ArtifactType, "application/vnd.dev.sigstore.bundle")` — a prefix match against precisely what GHCR is storing. It only runs when the ClusterPolicy's `verifyImages[].type` is set to `SigstoreBundle` (an enum alongside `Cosign` — the default — and `Notary`; `api/kyverno/v1/image_verification_types.go`). The existing `keyless.subject`/`issuer`/`rekor.url` fields are read identically by both code paths (`sigstore.go`'s `buildPolicy()`), so no other part of the policy needed to change.
 
-**Fix**: replaced `cosignOCI11: true` with `type: SigstoreBundle` on `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s `verifyImages[]` entry. See `docs/security/admission-policy.md` §6 for the full writeup, including the abandoned `cosignOCI11` attempt kept in the history rather than erased. **Not yet confirmed by a real `make kyverno-verify-demo` run with the field applied** — `python3 -c yaml.safe_load` on the rendered template and `make lint`/`make test` (382/382) are clean in the sandbox; this is a real, persistent-cluster-only check (CI's own workflow never runs `kyverno-apply-policy`/`kyverno-verify-demo` at all), so only Darya can confirm it.
+**Fix**: replaced `cosignOCI11: true` with `type: SigstoreBundle` on `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s `verifyImages[]` entry. See `docs/security/admission-policy.md` §6 for the full writeup, including the abandoned `cosignOCI11` attempt kept in the history rather than erased.
+
+**Confirmed, real run on Darya, 2026-10-29**: `make kyverno-apply-policy && make kyverno-verify-demo REF=ghcr.io/arash00009/polaris-ai-platform/ai-service@sha256:48f577c6858384516b43c36d07e8619dcd8531af92b45aee544ef903cfb7d586` with the `type: SigstoreBundle` field live in the applied `ClusterPolicy`:
+
+```
+clusterpolicy.kyverno.io/verify-ai-service-images configured
+[ ok ] applied ClusterPolicy/verify-ai-service-images for ghcr.io/arash00009/polaris-ai-platform/ai-service
+pod/kyverno-verify-demo-signed created
+[ ok ] positive case passed: a correctly-signed image was admitted
+[ ok ] negative case passed: an unsigned/nonexistent image was rejected by the admission webhook
+[ ok ] both cases confirmed
+```
+
+Both cases passed: the real, signed digest from CI run `40250439366` was admitted, and the same reference one hex character off (guaranteed real-looking, never pushed, never signed) was rejected by the admission webhook itself — not merely left to fail later with `ImagePullBackOff`. This is the first time in this project's history that the full ADR-35 (Cosign keyless signing) + ADR-36 (Kyverno admission-time verification) chain has been proven end-to-end against a real cluster, a real registry, and a real CI-produced signature — CI signs it, `cosign-verify` confirms the signature on its own, and `kyverno-verify-demo` confirms the admission webhook enforces it correctly in both directions.
 
 One thing worth naming here rather than only in `docs/security/admission-policy.md` §3: even a
 fully successful real run through all four steps above would **not** mean `polaris-dev` itself is

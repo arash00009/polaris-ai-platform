@@ -1,9 +1,11 @@
 # Admission policy: Kyverno verifies Cosign signatures (Phase 15 session 2)
 
-**Status: written and shellchecked in the sandbox, 2026-10-15 — not yet confirmed on the target
-machine.** See ADR-36 for the full decision record; this document is the operational guide — what
-the policy actually enforces, how to install and test it, and exactly what gap it does and does
-not close today.
+**Status: confirmed on the target machine (Darya), 2026-10-29 — `make kyverno-verify-demo`'s
+positive and negative cases both passed against a real signed digest on the real cluster.** See
+§6 for the real run output, and ADR-36 for the full decision record. This document is the
+operational guide — what the policy actually enforces, how to install and test it, and exactly
+what gap it does and does not close today (§3: the real, running `polaris-dev`/`-staging`/`-prod`
+environments do not yet pull from the GHCR path this policy checks).
 
 ## 1. What this adds
 
@@ -154,5 +156,28 @@ set to `SigstoreBundle` (an enum alongside the default, `Cosign`, and `Notary`).
 `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s single `verifyImages[]`
 entry. This is not CI-ephemeral-specific — the real, persistent `polaris-dev` cluster on Darya
 is what this was tested against — and it is specific to the artifact format this cosign version
-writes by default, not something `--ephemeral` or any CI-only path needs to care about. Confirm
-column updated once a real `make kyverno-verify-demo` run passes with the field applied.
+writes by default, not something `--ephemeral` or any CI-only path needs to care about.
+
+**Confirmed, real run on Darya, 2026-10-29.** `make kyverno-apply-policy` re-applied the
+`ClusterPolicy` with `type: SigstoreBundle` live, then `make kyverno-verify-demo
+REF=ghcr.io/arash00009/polaris-ai-platform/ai-service@sha256:48f577c6858384516b43c36d07e8619dcd8531af92b45aee544ef903cfb7d586`
+ran both cases against the real cluster:
+
+```
+clusterpolicy.kyverno.io/verify-ai-service-images configured
+[ ok ] applied ClusterPolicy/verify-ai-service-images for ghcr.io/arash00009/polaris-ai-platform/ai-service
+pod/kyverno-verify-demo-signed created
+[ ok ] positive case passed: a correctly-signed image was admitted
+[ ok ] negative case passed: an unsigned/nonexistent image was rejected by the admission webhook
+[ ok ] both cases confirmed
+```
+
+The positive case (the real, signed digest from CI run `40250439366`) was admitted; the negative
+case (the same repository path, one hex character off — a real-looking reference guaranteed
+never to have been pushed or signed) was rejected by the admission webhook itself, not merely
+left to fail later with `ImagePullBackOff`. This closes out this document's own §5: the
+verification *mechanism* is now proven correct against a real signed digest, on the real
+persistent cluster, for the first time in this project's history. §3's gap stands exactly as
+written above — `polaris-dev`/`-staging`/`-prod` still pull from `registry.localhost:5000/...`,
+never from the `ghcr.io` path this policy checks — this run confirms the policy itself works,
+not that anything in the running cluster is enforced by it yet.
