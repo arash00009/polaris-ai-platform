@@ -1127,16 +1127,16 @@ anything else in Phase 15, and is deliberately not attempted inside this already
 ### ADR-37: AI governance — a Git-based manifest, not MLflow; model/prompt/deployment/config
 version on every response, log, span and the Prometheus info metric
 
-Status: accepted. Unit-tested in the sandbox (183 tests, `ai_service`'s coverage gate of 95%
-exceeded at 99.32%, `ruff check`/`ruff format --check` clean); the Helm-chart half (`helm/ai-
-platform/templates/configmap.yaml`'s two new keys) is static-YAML-with-placeholders, the same
-kind `tests/bootstrap/test_static.sh` already checks by substring for every other `.tmpl`/
-templated manifest in this project (Kyverno's policy template, `deployment.yaml`'s existing
-`checksum/config` line), not confirmed by an actual `helm template`/`helm upgrade` run — this
-sandbox has no `helm` binary and no cluster. **Not yet confirmed on the target machine**: that a
-real `helm upgrade` actually injects `POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into
-a running Pod's environment, and that `GET /v1/meta`/`GET /metrics`'s `ai_service_governance_info`
-show real, non-"unset" values there.
+Status: accepted, **confirmed on the target machine (Darya), 2026-10-29**. Unit-tested in the
+sandbox first (183 tests, `ai_service`'s coverage gate of 95% exceeded at 99.32%, `ruff check`/
+`ruff format --check` clean), then confirmed for real: after a real image rebuild/push and a
+GitOps tag bump (a config-only ConfigMap change rolls out automatically via the existing
+`checksum/config` annotation, but the governance code itself needed a new image — see
+`docs/troubleshooting.md`'s Phase 16 section for the exact sequence and two real gotchas hit
+along the way), `GET /v1/meta` and `GET /metrics`'s `ai_service_governance_info` both showed
+real, non-"unset" values on a live Pod (`deployment_version=0.4.0-4531878b9203`,
+`config_version=0.3.0`, matching the exact deployed image tag and `Chart.yaml` version). This
+closes the one gap left open when this ADR was first written.
 
 Context: `docs/architecture.md`'s Phase 0 roadmap names Phase 16's "Done when" line explicitly —
 "Every response and signal carries model/prompt/deployment/config version; registry manifest;

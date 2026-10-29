@@ -503,3 +503,30 @@ someone to discover later by noticing the policy "isn't doing anything" to the r
 See ADR-35 / ADR-36 and `docs/security/image-signing.md` / `docs/security/admission-policy.md`
 for the full decision record and exactly what each piece does and does not prove.
 
+## Phase 16: AI governance (`app/ai_service/src/ai_service/governance/`, `helm/ai-platform/templates/configmap.yaml`)
+
+### Encountered on a real machine (Darya, 2026-10-29)
+
+| Symptom | Cause | Fix | Confirm |
+|---------|-------|-----|---------|
+| After applying the Phase 16 chart/ConfigMap change, `kubectl exec ... -- curl` fails with `curl: executable file not found in $PATH` | The runtime image is deliberately minimal (Phase 3's own hardening: no shell utilities beyond what the app needs) — `curl` was never installed in it | Use `kubectl port-forward deploy/ai-service <port>:<port>` and run `curl` from the host instead of `kubectl exec ... curl` | `curl -s localhost:<port>/v1/meta` returns a real JSON body from the host |
+| `GET /v1/meta` returned `{"error":{"code":"not_found",...}}` and `/metrics` had no `governance_info` series right after the Helm chart change rolled out | The ConfigMap-only change (`POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION`) rolled out immediately via the existing `checksum/config` annotation (Phase 7), but the governance **code** itself (the `/v1/meta` route, the manifest loader, the new metric) lives in a container image that was never rebuilt — the running Pod was still the previous phase's image. A config-shape change and a code change are not the same kind of rollout in this project's pipeline, and only the first one is automatic | `make image-build && make image-push`, then bump the tag into GitOps so Argo CD picks it up: `make gitops-bump-dev ARGS=--push` | `kubectl -n polaris-dev get deploy ai-service -o jsonpath='{.spec.template.spec.containers[0].image}'` shows the new `<version>-<git-sha>` tag |
+| `make gitops-bump-dev ARGS=--push` failed: `[FAIL] Tag 0.1.0-<sha> is not in the local registry` | `scripts/gitops/bump-image-tag.sh` derives both services' tags from the *same* git sha and refuses to bump either one unless both images exist in the registry at that sha — even though only `ai_service`'s source changed this phase, `ai-gateway`'s tag at the new commit didn't exist yet | Run `make gateway-image-build && make gateway-image-push` first (the script's own error message names the exact fix), then retry `make gitops-bump-dev ARGS=--push` | The script's own `[ok] registry lists polaris/ai-gateway: [...]` line shows the new tag present before the bump succeeds |
+| Right after the image-tag bump synced, `ai-service-d9bdc7f8b-mdx7r` flapped — `Unhealthy`/`context deadline exceeded` on `/healthz`/`/readyz`, several kubelet-triggered restarts, briefly `0/1 Error` | A rolling update briefly ran the old and new ReplicaSets side by side while Argo CD replaced the Deployment's pod template; the old ReplicaSet's last Pod failed its probes as it was being torn down, not the new code | No fix needed — this is ordinary rolling-update churn, not a regression. Confirmed by checking which ReplicaSet the failing Pod belonged to | `kubectl -n polaris-dev get pods -l app.kubernetes.io/name=ai-service` shows a **new** ReplicaSet hash (`ai-service-cbb7cd85d-*`) `1/1 Running` with `0` restarts, while only the **old** hash (`ai-service-d9bdc7f8b-*`) shows the restarts/`Error` |
+
+**Confirmed, real run on Darya, 2026-10-29**: after the image rebuild/push and GitOps tag bump above, the new `ai-service-cbb7cd85d-*` Pods came up clean (`0` restarts), running `registry.localhost:5000/polaris/ai-service:0.4.0-4531878b9203`. Both governance-record forms named in `docs/ai-governance.md` §4 were checked directly against that real Pod (via `kubectl port-forward`, since the image has no `curl`):
+
+```
+$ curl -s localhost:8000/v1/meta
+{"model_version":"llama3.2:1b-instruct-q4_K_M","prompt_version":"v1","deployment_version":"0.4.0-4531878b9203","config_version":"0.3.0","environment":"dev"}
+
+$ curl -s localhost:8000/metrics | grep governance_info
+# HELP ai_service_governance_info Fixed at 1; labels carry the declared model/prompt/deployment/config version this process is running (Phase 16, ADR-37).
+# TYPE ai_service_governance_info gauge
+ai_service_governance_info{config_version="0.3.0",deployment_version="0.4.0-4531878b9203",model_version="llama3.2:1b-instruct-q4_K_M",prompt_version="v1"} 1.0
+```
+
+Both show real, non-`"unset"` values: `deployment_version` matches the exact image tag just deployed, `config_version` matches `Chart.yaml`'s `0.3.0`, and `model_version`/`prompt_version` match the governance manifest. This is the first time the full Phase 16 chain — declared manifest, Helm-injected deployment/config version, and the real running Pod's own self-report — has been proven end to end on a real cluster, closing the one gap ADR-37 and `docs/ai-governance.md` §6 had named as not yet done. The earlier Pod-level env var check (`POLARIS_DEPLOYMENT_VERSION=0.4.0-05ae4838f600`) was from the ConfigMap-only rollout *before* the image rebuild — correct for that step, but not yet running the new code; the values above are from after the full rebuild/push/bump sequence and are the ones that matter.
+
+See ADR-37 and `docs/ai-governance.md` for the full decision record.
+

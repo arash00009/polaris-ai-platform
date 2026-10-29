@@ -479,13 +479,13 @@ GitHub Actions run before a cluster-side check is even possible, unlike every ea
 
 ## Phase 16
 
-Status: **unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
-183 tests pass in `app/ai_service`, coverage is 99.32 % (the 95 % gate), `ruff check`/
-`ruff format --check` are clean. Not yet confirmed: a real `helm upgrade` on Darya actually
-injecting `POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into a running Pod, and
-`GET /v1/meta`/the `ai_service_governance_info` Prometheus metric showing real, non-`"unset"`
-values there — this sandbox has no `helm` binary and no cluster. Full record:
-`docs/ai-governance.md`, ADR-37.
+Status: **confirmed on the target machine (Darya), 2026-10-29.** 183 tests pass in
+`app/ai_service`, coverage is 99.32 % (the 95 % gate), `ruff check`/`ruff format --check` are
+clean. On the real cluster, after a real image rebuild/push and GitOps tag bump, `GET /v1/meta`
+and the `ai_service_governance_info` Prometheus metric both showed real, non-`"unset"` values on
+a running Pod (`deployment_version=0.4.0-4531878b9203`, `config_version=0.3.0`) — closing the one
+gap this phase had left open. Full record: `docs/ai-governance.md`, `docs/troubleshooting.md`'s
+Phase 16 section, ADR-37.
 
 ### Declared-vs-actual governance manifest and drift detection
 

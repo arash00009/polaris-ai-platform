@@ -7,13 +7,24 @@ signal carries model/prompt/deployment/config version; registry manifest; MLflow
 recorded."* See ADR-37 for the full design record, including why a Git-based manifest was chosen
 over MLflow.
 
-**Status: unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
-183 tests pass, coverage is 99.32 % (the 95 % gate), `ruff check`/`ruff format --check` are
-clean. What is *not* yet confirmed: that a real `helm upgrade` on Darya actually injects
-`POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into a running Pod, and that `GET /v1/meta`
-and the `ai_service_governance_info` Prometheus metric show real (non-`"unset"`) values there.
-This sandbox has no `helm` binary and no cluster, so that confirmation can only happen on Darya
-— see §5.
+**Status: confirmed on the target machine (Darya), 2026-10-29.** 183 tests pass in the sandbox,
+coverage is 99.32 % (the 95 % gate), `ruff check`/`ruff format --check` are clean. On the real
+cluster, after a real image rebuild/push and a GitOps tag bump (see `docs/troubleshooting.md`'s
+Phase 16 section for the full sequence and two real gotchas hit along the way), `GET /v1/meta`
+and the `ai_service_governance_info` Prometheus metric both showed real, non-`"unset"` values on
+a running Pod:
+
+```
+$ curl -s localhost:8000/v1/meta
+{"model_version":"llama3.2:1b-instruct-q4_K_M","prompt_version":"v1","deployment_version":"0.4.0-4531878b9203","config_version":"0.3.0","environment":"dev"}
+
+$ curl -s localhost:8000/metrics | grep governance_info
+ai_service_governance_info{config_version="0.3.0",deployment_version="0.4.0-4531878b9203",model_version="llama3.2:1b-instruct-q4_K_M",prompt_version="v1"} 1.0
+```
+
+`deployment_version` matches the exact image tag deployed; `config_version` matches
+`Chart.yaml`'s `0.3.0`. See §6 for what this confirmation needed and §4 of
+`docs/troubleshooting.md`'s Phase 16 section for the two real pipeline gotchas it surfaced.
 
 ## 1. The two things "governed" means here
 
@@ -111,16 +122,39 @@ genuinely in play *at once* (A/B testing a prompt, comparing two quantizations s
 once Phase 17 (AI evaluation) needs to join evaluation scores to a specific prompt/model version
 — the real forcing function `docs/architecture.md`'s own roadmap already anticipates MLflow for.
 
-## 6. Target-machine verification — not yet done, and why it is sequenced differently
+## 6. Target-machine verification — confirmed, and what it took
 
 Everything in this phase that is pure Python — the manifest loader's validation, the drift
 check, the new response/log/span/metric fields — is fully exercised by the sandbox's own unit
 tests, with no cluster needed (unlike Phase 15's Cosign/Kyverno work, which genuinely could not
-be proven without a real registry and a real admission webhook). What the sandbox *cannot*
-confirm is the Helm-chart half: that `helm upgrade` really does inject
-`POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into a running Pod's environment from
-`.Values.image.tag`/`.Chart.Version`, and that `GET /v1/meta`/`GET /metrics` on that real Pod
-show the real tag/chart-version instead of `"unset"`. This sandbox has no `helm` binary and no
-Docker daemon — confirmed the same way every earlier Kubernetes-facing phase in this project has
-been: only a real `helm upgrade` on Darya, followed by a real `curl .../v1/meta` and a real
-`curl .../metrics | grep governance_info` against the live Pod, proves it.
+be proven without a real registry and a real admission webhook). The Helm-chart half — whether
+`POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` actually reach a running Pod's environment
+from `.Values.image.tag`/`.Chart.Version`, and whether `GET /v1/meta`/`GET /metrics` on that real
+Pod show the real tag/chart-version instead of `"unset"` — needed Darya, since this sandbox has
+no `helm` binary and no Docker daemon.
+
+It took more than a plain `helm upgrade`, and the extra steps are a real lesson about this
+project's deploy pipeline, not incidental friction: a **config-only** change (this phase's two
+new `configmap.yaml` keys) rolls out automatically the moment it's committed, via the
+`checksum/config` annotation Phase 7 added — Argo CD's own self-heal picked it up with no manual
+step. But the governance **code** itself (the `/v1/meta` route, the manifest loader, the metric)
+ships inside the container image, and nothing about a chart/ConfigMap change rebuilds that image.
+The first real check against the live Pod returned `/v1/meta`'s `not_found` — the correct,
+honest result, since the Pod was still running the previous phase's image. Confirming for real
+meant the full pipeline: `make image-build && make image-push`, then
+`make gitops-bump-dev ARGS=--push` to move the new tag through GitOps (which also required
+rebuilding `ai-gateway` at the same git sha, since this repo's tag-bump script ties both
+services' tags to one commit — see `docs/troubleshooting.md`'s Phase 16 section for the exact
+error and fix). Once the new image was actually running:
+
+```
+$ curl -s localhost:8000/v1/meta
+{"model_version":"llama3.2:1b-instruct-q4_K_M","prompt_version":"v1","deployment_version":"0.4.0-4531878b9203","config_version":"0.3.0","environment":"dev"}
+
+$ curl -s localhost:8000/metrics | grep governance_info
+ai_service_governance_info{config_version="0.3.0",deployment_version="0.4.0-4531878b9203",model_version="llama3.2:1b-instruct-q4_K_M",prompt_version="v1"} 1.0
+```
+
+Real, non-`"unset"` values on both — `deployment_version` matches the exact deployed image tag,
+`config_version` matches `Chart.yaml`'s `0.3.0`. This closes the one gap this document and
+ADR-37 had both named as not yet done.
