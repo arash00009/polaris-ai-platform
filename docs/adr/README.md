@@ -1277,9 +1277,12 @@ proof" discipline every earlier Kubernetes-facing phase in this project has foll
 ### ADR-38: AI evaluation — a custom harness + golden dataset, not Langfuse; a Prometheus
 Pushgateway to carry batch eval scores, tagged with Phase 16's declared model/prompt version
 
-Status: accepted. Unit-tested in the sandbox; the Pushgateway Helm install and a real eval run
-against a live `ai_service` need a real cluster — this sandbox has no `helm` binary and no
-cluster. See `docs/ai-evaluation.md` §5 for exactly what is and is not yet confirmed.
+Status: accepted, confirmed on the target machine (Darya), 2026-10-29. `make pushgateway-install`
+really deployed `prometheus-pushgateway-3.10.0`; a real `make eval-run` against the Ollama-backed
+`polaris-dev` deployment scored `mean_score: 0.0625` (an honest, non-perfect number, exactly as
+expected for a real model against a keyword-exact check); `polaris_eval_score` showed up in
+Prometheus with the pushed `job="polaris_eval"` label intact, confirming `honorLabels: true`
+actually does what §Decision claims. See `docs/ai-evaluation.md` §5-§6 for the full real output.
 
 Context: `docs/architecture.md`'s Phase 0 roadmap names Phase 17's "Done when" line explicitly —
 "Golden dataset, evaluation scores tracked per prompt/model version, shown next to technical

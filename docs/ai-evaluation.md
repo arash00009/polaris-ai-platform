@@ -5,14 +5,12 @@ dataset, evaluation scores tracked per prompt/model version, shown next to techn
 dashboards."* See ADR-38 for the full design record, including why a custom harness was chosen
 over Langfuse/Phoenix and why a Prometheus Pushgateway carries the score.
 
-**Status: unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
-`eval/`'s own test suite passes (44 tests, 99.15% coverage, `ruff check`/`ruff format --check`
-clean), and the harness was run for real in the sandbox against a live, locally-started
-`ai_service` (`MockBackend`) over plain HTTP — see §5 for that output. What is *not* yet
-confirmed: a real `helm install` of the Pushgateway chart, a real eval run against the Ollama-
-backed `polaris-dev` deployment, and the pushed `polaris_eval_score` metric actually showing up
-in Prometheus/Grafana. This sandbox has no `helm` binary and no cluster, so that confirmation
-can only happen on Darya.
+**Status: confirmed on the target machine (Darya), 2026-10-29.** `eval/`'s own test suite passes
+(44 tests, 99.15% coverage, `ruff check`/`ruff format --check` clean); the harness was run for
+real in the sandbox against a live, locally-started `ai_service` (`MockBackend`) over plain HTTP
+(§5); and, on Darya, a real `helm install` of the Pushgateway chart, a real eval run against the
+Ollama-backed `polaris-dev` deployment, and the pushed `polaris_eval_score` metric actually
+showing up in Prometheus were all confirmed for real — see §6.
 
 ## 1. What is actually measured
 
@@ -115,16 +113,78 @@ A perfect 1.0, exactly as designed (§1) — the real, deterministic-by-design c
 yet the interesting measurement. `--min-score` was also checked for real: `--min-score 1.0`
 exits `0`; `--min-score 1.01` exits `1` with the mean score printed in the error.
 
-## 6. Target-machine verification — not yet done
+## 6. Target-machine verification — confirmed on Darya, 2026-10-29
 
-Not yet confirmed: a real `helm install` of the Pushgateway chart (`make pushgateway-install`);
-a real eval run against `polaris-dev`'s Ollama-backed `OpenAICompatBackend` (expected to score
-well below 1.0 — a real, honest, non-perfect number is the point, not a defect); the pushed
-`polaris_eval_score` metric actually appearing in Prometheus (`curl .../api/v1/query?query=
-polaris_eval_score`); and the Grafana dashboard (`deploy/platform/eval/dashboards/
-eval-dashboard.json`) actually rendering it. This sandbox has no `helm` binary and no Docker
-daemon — confirmed the same way every earlier Kubernetes-facing phase in this project has been:
-only a real `helm install` and a real `make eval-run` against Darya's own `polaris-dev` prove it.
+**Pushgateway install, for real:**
+
+```
+$ make pushgateway-install
+...
+[ ok ] pushgateway installed: prometheus-pushgateway-3.10.0
+[info] applying the eval Grafana dashboard ConfigMap
+configmap/eval-dashboard created
+[ ok ] Pushgateway is up in 'eval'.
+```
+
+One real gotcha found along the way: the harness's default per-request timeout (30s) is too
+short for `llama3.2:1b-instruct-q4_K_M` running on CPU under WSL2 — a single manual `/v1/chat`
+call took 89s before `ai_service`'s *own* internal backend timeout fired first and returned a
+clean `backend_timeout` error. `make eval-run`'s `--timeout` flag exists for exactly this; `120`
+was enough. See `docs/troubleshooting.md`'s Phase 17 section.
+
+**A real eval run against the Ollama-backed `polaris-dev` deployment** (`--backend openai_compat
+--timeout 120`), pushed to the real Pushgateway:
+
+```
+{
+  "backend": "openai_compat",
+  "model_version": "llama3.2:1b-instruct-q4_K_M",
+  "prompt_version": "v1",
+  "mean_score": 0.0625,
+  ...
+}
+pushed to http://127.0.0.1:9091 (job=polaris_eval)
+```
+
+`0.0625` is a real, honest, non-perfect number — exactly the point named in §1: the mock-backend
+canary (§5) proves the harness works, and this is the actually interesting measurement. Per
+category: `pods` and `services` and `deployments` scored `0`, `namespaces` scored `0.25` (one of
+two namespace answers used "logical partition" in substance but not as that literal phrase, and
+the other partially matched). The model's answers were coherent English but didn't reliably use
+this project's own Kubernetes vocabulary (e.g. describing Service routing as "Connection
+Multiplexing," a term Kubernetes itself doesn't use) — precisely the gap keyword-presence scoring
+is designed to catch, and precisely why §4 is explicit that this score measures terminology
+presence, not correctness.
+
+**The metric, for real, in Prometheus** (`curl .../api/v1/query?query=polaris_eval_score`):
+
+```
+{
+  "metric": {
+    "__name__": "polaris_eval_score",
+    "backend": "openai_compat",
+    "category": "overall",
+    "job": "polaris_eval",
+    "model_version": "llama3.2:1b-instruct-q4_K_M",
+    "namespace": "eval",
+    "prompt_version": "v1",
+    "service": "pushgateway-prometheus-pushgateway",
+    ...
+  },
+  "value": [1793306572.739, "0.0625"]
+}
+```
+
+This confirms the ADR-38 design claim for real: `job="polaris_eval"` — the label the harness
+pushed — survived Prometheus's scrape-time relabeling untouched, sitting alongside the
+Pushgateway's own target labels (`namespace`, `service`, `pod`, `container`, `endpoint`) rather
+than being overwritten by them. That is exactly what `serviceMonitor.honorLabels: true` is for,
+and it would have silently broken without it.
+
+Not yet confirmed: the Grafana dashboard (`deploy/platform/eval/dashboards/eval-dashboard.json`)
+actually rendering this data in a browser — the Prometheus query above proves the data is
+queryable, which is the dashboard's data source, but the dashboard panels themselves haven't
+been opened and visually checked yet.
 
 ## Revisit when
 

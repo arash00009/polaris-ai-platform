@@ -511,14 +511,16 @@ Phase 16 section, ADR-37.
 
 ## Phase 17
 
-Status: **unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
-`eval/`'s own test suite passes (44 tests, 99.15% coverage, `ruff check`/`ruff format --check`
-clean), and the harness was run for real against a locally-started `ai_service` (no cluster
-needed for that part), scoring a perfect 1.0 against `MockBackend` as designed. Not yet
-confirmed: a real `helm install` of the Prometheus Pushgateway, a real eval run against the
-Ollama-backed `polaris-dev` deployment, and the pushed `polaris_eval_score` metric actually
-appearing in Prometheus/Grafana — this sandbox has no `helm` binary and no cluster. Full record:
-`docs/ai-evaluation.md`, ADR-38.
+Status: **confirmed on the target machine (Darya), 2026-10-29.** `eval/`'s own test suite passes
+(44 tests, 99.15% coverage, `ruff check`/`ruff format --check` clean). The harness was run for
+real against a locally-started `ai_service` (no cluster needed), scoring a perfect 1.0 against
+`MockBackend` as designed; on Darya, a real `helm install` of the Prometheus Pushgateway
+(`prometheus-pushgateway-3.10.0`), a real eval run against the Ollama-backed `polaris-dev`
+deployment (`mean_score: 0.0625`, a real, honest, non-perfect number), and the pushed
+`polaris_eval_score` metric actually appearing in Prometheus (with `honorLabels: true` confirmed
+preserving the pushed `job` label) were all confirmed. Not yet confirmed: the Grafana dashboard
+panels rendering it in a browser. Full record: `docs/ai-evaluation.md`, ADR-38,
+`docs/troubleshooting.md` Phase 17.
 
 ### Golden dataset + keyword-presence scoring harness
 

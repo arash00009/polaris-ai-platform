@@ -530,3 +530,47 @@ Both show real, non-`"unset"` values: `deployment_version` matches the exact ima
 
 See ADR-37 and `docs/ai-governance.md` for the full decision record.
 
+## Phase 17: AI evaluation (`eval/`, `deploy/platform/pushgateway/`, `scripts/bootstrap/pushgateway.sh`)
+
+### Encountered on a real machine (Darya, 2026-10-29)
+
+| Symptom | Cause | Fix | Confirm |
+|---------|-------|-----|---------|
+| `make eval-run` against `--backend openai_compat` failed: `error: POST /v1/chat failed for prompt '...': timed out` | The harness's default per-request timeout (30s, `client.py`'s `timeout_s`) is tuned for the fast `MockBackend`/typical API latency, not a 1B-parameter model running on CPU under WSL2. A manual `curl --max-time 180` against the same endpoint took **89s** before `ai_service`'s own internal backend timeout fired first and returned a clean `backend_timeout` error body (not a hang, not a crash — a correctly-handled slow backend) | Pass `--timeout 120` (or higher) to `make eval-run ARGS='...'` | The same run with `--timeout 120` completed all 8 prompts and printed a full report |
+| `kubectl -n eval port-forward svc/pushgateway ...` — no such service | The Helm release name (`pushgateway`) and the chart's own generated service name are not the same string; the chart prefixes the service with `<release>-<chart-name>` | Look up the real name first: `kubectl -n eval get svc` → `pushgateway-prometheus-pushgateway` | `kubectl -n eval get svc` lists exactly that one ClusterIP service on port `9091` |
+| Looking for a Prometheus service to query `polaris_eval_score` directly | `kube-prometheus-stack`'s Prometheus service name isn't `prometheus` — it's the release-prefixed `kube-prometheus-stack-prometheus` (there's also a separate Prometheus-operator-managed `prometheus-operated` headless service) | `kubectl -n observability get svc \| grep -i prometheus`, then port-forward the `ClusterIP` one on `9090` | `curl .../api/v1/query?query=polaris_eval_score` returns real result vectors |
+
+**Confirmed, real run on Darya, 2026-10-29**: `make pushgateway-install` deployed
+`prometheus-pushgateway-3.10.0` for real (`helm` output confirmed the chart version, the Pod came
+up `1/1 Running` with `0` restarts). A real `make eval-run --backend openai_compat --timeout 120`
+against the Ollama-backed `polaris-dev` deployment scored `mean_score: 0.0625` — a real, honest,
+non-perfect number, not a defect (see `docs/ai-evaluation.md` §6 for the full report and why the
+model's answers missed the expected keywords). The pushed metric was then confirmed for real in
+Prometheus:
+
+```
+$ curl -s 'http://127.0.0.1:9090/api/v1/query?query=polaris_eval_score' | python3 -m json.tool
+...
+"metric": {
+  "__name__": "polaris_eval_score",
+  "backend": "openai_compat",
+  "category": "overall",
+  "job": "polaris_eval",
+  "model_version": "llama3.2:1b-instruct-q4_K_M",
+  "namespace": "eval",
+  "prompt_version": "v1",
+  "service": "pushgateway-prometheus-pushgateway",
+  ...
+},
+"value": [1793306572.739, "0.0625"]
+```
+
+This is the real confirmation ADR-38's `honorLabels: true` claim needed: the pushed `job=
+"polaris_eval"` label survived Prometheus's scrape-time relabeling, sitting alongside the
+Pushgateway's own target labels (`namespace`, `service`, `pod`, `container`, `endpoint`) instead
+of being overwritten by them — exactly the failure mode `honorLabels: false` would have caused,
+now proven to not happen. Not yet confirmed: the Grafana dashboard panels actually rendering this
+data in a browser.
+
+See ADR-38 and `docs/ai-evaluation.md` for the full decision record.
+
