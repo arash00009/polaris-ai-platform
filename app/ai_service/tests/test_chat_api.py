@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from ai_service.backends import BackendError, BackendResult, BackendTimeout, ModelBackend
 from ai_service.config import Settings
+from ai_service.governance import load_governance_info
 from ai_service.main import create_app
 from tests.fakes import FakeBackend
 
@@ -17,8 +18,23 @@ def test_chat_returns_the_documented_shape(client: TestClient) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"response", "model", "request_id", "latency_ms"}
+    assert set(body) == {
+        "response",
+        "model",
+        "request_id",
+        "latency_ms",
+        # Phase 16 (ADR-37): the governance manifest's declared versions, on every response.
+        "model_version",
+        "prompt_version",
+        "deployment_version",
+        "config_version",
+    }
     assert body["model"] == "mock-1"
+    assert body["model_version"] == "mock-1"
+    assert body["prompt_version"] == "v1"
+    # Neither is set by Helm in this test process -- see config.py's own "unset" sentinel.
+    assert body["deployment_version"] == "unset"
+    assert body["config_version"] == "unset"
     assert body["response"].startswith("[mock] ")
     assert "smallest deployable unit" in body["response"]
     assert isinstance(body["latency_ms"], int | float)
@@ -198,6 +214,63 @@ def test_injected_backend_is_used_and_closed_on_shutdown() -> None:
         assert backend.prompts == [VALID["prompt"]]
         assert backend.closed is False
     assert backend.closed is True
+
+
+# ---- governance (Phase 16, ADR-37) ------------------------------------------------------
+
+
+def test_chat_passes_the_governance_manifests_system_prompt_to_the_backend() -> None:
+    backend = FakeBackend()
+    with TestClient(create_app(Settings(), backend=backend)) as client:
+        client.post("/v1/chat", json=VALID)
+    assert backend.system_prompts == [load_governance_info().system_prompt]
+
+
+def test_meta_endpoint_reports_the_declared_governance_version(client: TestClient) -> None:
+    response = client.get("/v1/meta")
+    assert response.status_code == 200
+    body = response.json()
+    governance = load_governance_info()
+    assert body == {
+        "model_version": governance.declared_model_version("mock"),
+        "prompt_version": governance.prompt_version,
+        "deployment_version": "unset",
+        "config_version": "unset",
+        "environment": "local",
+    }
+
+
+def test_a_backend_that_answers_with_an_undeclared_model_logs_governance_drift(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # FakeBackend always reports model="fake-model" (tests/fakes.py), which the governance
+    # manifest never declares for any backend -- exactly the drift this phase's whole feature
+    # exists to catch, on every single request, not only a deliberately contrived one.
+    with (
+        caplog.at_level(logging.WARNING, logger="ai_service"),
+        _client_with(FakeBackend()) as client,
+    ):
+        response = client.post("/v1/chat", json=VALID)
+
+    assert response.status_code == 200
+    drift = _record(
+        caplog,
+        "governance drift detected: backend answered with a different model than the "
+        "governance manifest declares",
+        "ai_service",
+    )
+    assert drift.model == "fake-model"
+    assert drift.declared_model_version == load_governance_info().declared_model_version("mock")
+
+
+def test_a_backend_that_answers_with_the_declared_model_logs_no_drift_warning(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The `client` fixture's real MockBackend reports settings.mock_model_name's default
+    # ("mock-1"), which is exactly manifest.json's declared "mock" entry -- no drift to report.
+    with caplog.at_level(logging.WARNING, logger="ai_service"):
+        client.post("/v1/chat", json=VALID)
+    assert not any("governance drift" in record.getMessage() for record in caplog.records)
 
 
 # ---- logging ---------------------------------------------------------------------------

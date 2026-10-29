@@ -1124,6 +1124,156 @@ a real, running workload rather than only a demonstration `Pod`. That is a mater
 change to this project's "build and iterate with zero network dependency" deploy model than
 anything else in Phase 15, and is deliberately not attempted inside this already-large session.
 
+### ADR-37: AI governance — a Git-based manifest, not MLflow; model/prompt/deployment/config
+version on every response, log, span and the Prometheus info metric
+
+Status: accepted. Unit-tested in the sandbox (183 tests, `ai_service`'s coverage gate of 95%
+exceeded at 99.32%, `ruff check`/`ruff format --check` clean); the Helm-chart half (`helm/ai-
+platform/templates/configmap.yaml`'s two new keys) is static-YAML-with-placeholders, the same
+kind `tests/bootstrap/test_static.sh` already checks by substring for every other `.tmpl`/
+templated manifest in this project (Kyverno's policy template, `deployment.yaml`'s existing
+`checksum/config` line), not confirmed by an actual `helm template`/`helm upgrade` run — this
+sandbox has no `helm` binary and no cluster. **Not yet confirmed on the target machine**: that a
+real `helm upgrade` actually injects `POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into
+a running Pod's environment, and that `GET /v1/meta`/`GET /metrics`'s `ai_service_governance_info`
+show real, non-"unset" values there.
+
+Context: `docs/architecture.md`'s Phase 0 roadmap names Phase 16's "Done when" line explicitly —
+"Every response and signal carries model/prompt/deployment/config version; registry manifest;
+MLflow decision recorded" — and section A4 names the fork this ADR has to resolve: "**MLflow**
+(SQLite backend) as a real model/run registry instead of a Git-based manifest." Section 6's data-
+flow table had already, in Phase 0, gone further than just naming the fork: it specified the
+governance record's own delivery shape ("Manifest in Git + a `/v1/meta` endpoint + a Prometheus
+info metric") and its trace/log attribute allow-list already reserved `model_version`/
+`prompt_version` as span attributes and `env`/`deployment_version` as Resource attributes —
+`ai_service/telemetry.py`'s `SPAN_ATTRIBUTE_ALLOWLIST` carried both names with a comment
+("never set yet") since Phase 10, three phases before this one. This ADR is substantially an
+implementation of an already-written specification, not a new design from scratch — a real
+instance of "a plan written early can still be right once its moment arrives," worth naming
+because it is not how every phase in this project has gone (Phase 8's gitops extraction and
+Phase 15's Kyverno `type: SigstoreBundle` fix both deviated from their own earlier plans for
+good, documented reasons; this one did not need to).
+
+Decision:
+
+- **A Git-based manifest (`ai_service/governance/manifest.json`), not MLflow.** This project's
+  own established bias against adding infrastructure without a concrete, proven need —
+  OpenCost over Kubecost (ADR-31), Sealed Secrets over Vault (ADR-33), a custom gateway over
+  Envoy/Kong/LiteLLM (`docs/architecture.md` section 17) — applies here exactly as it did there.
+  MLflow means a second persistent service (its own tracking server plus a SQLite/Postgres
+  backend, a new namespace, a new Helm release to operate and keep healthy) for a project that
+  has exactly one model per backend and one prompt template. A few git-tracked files already
+  give everything a model/prompt registry needs to prove at this scale: a single declared
+  source of truth, versioned by git history itself, diffable in a pull request, and comparable
+  against what actually answered a request. `docs/architecture.md` A4 already named MLflow as
+  something to adopt "only after Tier 2 works" and explicitly as "instead of a Git-based
+  manifest" — the fork this phase was always going to have to resolve, not a new tradeoff
+  invented here.
+- **JSON, not YAML, for the manifest file itself.** PyYAML is not a dependency of `ai_service`
+  anywhere else (confirmed: `grep -i yaml requirements.txt requirements-dev.txt` found nothing),
+  and the stdlib `json` module does the exact same job for one small, machine-read file without
+  adding a new pinned dependency and a new package for Trivy's SBOM/CVE scan to carry forever —
+  the same "every dependency needs a purpose" discipline already applied to keeping `pip`
+  itself out of the runtime image (`Dockerfile`) and refusing to compile anything from source
+  (`--only-binary=:all:`).
+- **The manifest and its one prompt-template file ship inside the `ai_service` Python package
+  (`app/ai_service/src/ai_service/governance/`), not a top-level `governance/` directory** —
+  `docs/architecture.md`'s Part B file tree sketch (written in Phase 0, before this constraint
+  was concretely known) shows a top-level `governance/`, but `app/ai_service/Dockerfile`'s build
+  context is scoped to `app/ai_service` (its own comment: "Build context is this directory"),
+  so a repository-root directory would never reach the built image at all — the manifest would
+  exist in git but not in the thing that actually runs. Packaging it as `[tool.setuptools.
+  package-data]` and loading it with `importlib.resources` at startup means `pip install .` (the
+  Dockerfile's own build step, unchanged) ships it automatically; confirmed for real in the
+  sandbox against both an editable install and a real, non-editable wheel install into a fresh
+  virtual environment (the latter is what the Dockerfile actually does) — the manifest and
+  prompt file land in `site-packages/ai_service/governance/` either way, not assumed to work
+  from the package-data declaration alone.
+- **The declared model version is compared, on every request, against what the backend itself
+  self-reports answering with (`BackendResult.model`)** — `main.py`'s `chat()` handler logs a
+  `WARNING`-level "governance drift detected" line (never raises; a mismatch should not turn a
+  successful answer into a failed request) whenever they differ. This is the actual point of
+  having a model registry at all, not decoration: it is what lets a different quantization
+  pulled, a model swapped, or a prompt edited without the manifest being updated to match, be
+  *visible*, the exact verb `docs/architecture.md`'s own project thesis uses for what this
+  platform's job is.
+- **A real "system" role message, not text concatenated into the user turn.** The governance
+  manifest's versioned prompt template is only a real, meaningful "prompt version" if it
+  actually changes what the model is told — `ModelBackend.generate()` gained an optional
+  `system_prompt: str | None = None` parameter (`base.py`), used by `OpenAICompatBackend` as a
+  genuine leading `{"role": "system", ...}` chat message (the OpenAI chat-completions shape
+  Ollama/vLLM also speak already has a dedicated role for exactly this) and accepted-but-
+  deliberately-unused by `MockBackend` (its answers are a deterministic lookup over the user
+  prompt alone, documented in its own module docstring — forcing it to pretend otherwise would
+  be dishonest, not thorough).
+- **`model_version`/`prompt_version` are per-span attributes (Phase 10's reservation, now
+  filled); `deployment_version` is a Resource attribute, not a span one; `config_version` is in
+  neither.** `telemetry.py`'s own Phase 10 comment already drew this line before this phase
+  existed: "`env`/`deployment_version`... are not span attributes at all... Resource attributes
+  set once" — unlike `model_version`/`prompt_version`, which genuinely could change request to
+  request if a future phase ever made them dynamic, `deployment_version` is a per-process fact.
+  `config_version` is new to this phase and was deliberately kept out of `docs/architecture.md`
+  section 6's own allow-list (fixed in Phase 0, before `config_version` existed as a separate
+  concept from `deployment_version`) rather than added to a list a different phase already
+  closed: a Helm chart's schema version changes far less often than a deployment does, so
+  tracing it per-request would add a label that is almost always identical to the last one,
+  for no benefit the response body/`/v1/meta` field does not already give.
+- **`POLARIS_CONFIG_VERSION` reuses `Chart.yaml`'s own `version` field** (its own comment:
+  "bump on any template/values-shape change") **rather than computing a second, independently-
+  maintained config-schema number.** A second number that could drift from the first is exactly
+  the class of bug this project's own discipline exists to avoid (Phase 15 session 1's hand-
+  pasted-ciphertext/duplicate-YAML-key bugs, both named in `docs/troubleshooting.md`). Wiring
+  this up surfaced an honest, pre-existing gap: `Chart.yaml`'s version had not actually been
+  bumped for Phases 12-15's own real shape changes (gateway templates, FinOps counters, tenant-
+  limits JSON, Sealed Secrets/egress NetworkPolicy additions) — found only while writing this
+  ADR, named in `Chart.yaml`'s own comment rather than silently corrected, and not reconstructed
+  retroactively (there is no reliable way to assign the right historical value to each of those
+  four phases after the fact); the version bump this phase makes (`0.2.0` → `0.3.0`) is honestly
+  only "config shape as of Phase 16," resuming the discipline from here rather than claiming to
+  repair the gap in the past.
+- **`POLARIS_DEPLOYMENT_VERSION` is `.Values.image.tag`, never `Chart.yaml`'s own `appVersion`**
+  — `Chart.yaml`'s own comment already warns `appVersion` "can drift from [the real image tag]
+  and does not drive it; do not read it as the deployed version," so this ADR does not.
+- **Both new `POLARIS_*` keys are added directly inside `templates/configmap.yaml`'s `data:`
+  block, not routed through the flat `values.yaml` `config:` map** every other `POLARIS_*`
+  setting uses. Both are derived from chart/release context (`.Values.image.tag`, `.Chart.
+  Version`), not a static per-environment value a person would tune in `values-<env>.yaml`, so
+  there is nothing for that map to hold for either one — and no circularity problem a self-
+  referencing checksum of the ConfigMap's own rendered content would otherwise create.
+
+Alternatives: MLflow — rejected for now, see Decision above; this ADR's own "Revisit when" names
+the condition that would reopen it. A second, project-specific OTel Resource namespace prefix
+(e.g. `polaris.deployment_version` instead of the bare `deployment_version` this ADR uses) —
+not used, because `docs/architecture.md` section 6's allow-list already fixed the literal,
+undotted name in Phase 0, and matching it exactly was judged more valuable than conforming to
+OTel's own semantic-convention dotting style for a single project-specific key. Computing
+`config_version` as a hash of the rendered ConfigMap (the mechanism `deployment.yaml`'s existing
+`checksum/config` annotation already uses for forcing rollouts) — not used: the ConfigMap would
+need to hash its own still-being-rendered content, which Helm's templating cannot do, and
+reusing `Chart.yaml`'s own version field was already available with no such problem.
+
+Consequences: `ai_service/governance/` (a new subpackage: `__init__.py`'s loader/validation,
+`manifest.json`, `prompts/v1-system.txt`), a new `[tool.setuptools.package-data]` entry in
+`pyproject.toml`, two new `Settings` fields (`deployment_version`/`config_version`, both
+defaulting to the sentinel `"unset"` outside Helm), `ModelBackend.generate()`'s signature gaining
+`system_prompt` (and every implementation/fake updated to match), four new `ChatResponse` fields
+and a new `MetaResponse`/`GET /v1/meta` endpoint, two new `LOG_FIELDS`/`SPAN_ATTRIBUTE_ALLOWLIST`
+entries actually being set for the first time since Phase 10 reserved them, a new
+`ai_service_governance_info` Prometheus Gauge, two new `templates/configmap.yaml` keys, and
+`Chart.yaml`'s version bump (with its own honestly-named gap, see Decision above). 42 new/
+changed tests (`test_governance.py` is new; `test_chat_api.py`, `test_mock_backend.py`,
+`test_openai_compat_backend.py`, `test_telemetry.py`, `test_finops_metrics.py`, `tests/fakes.py`
+all touched) keep the service's own coverage gate at 99.32%, well above the 95% floor.
+
+Revisit when: a second model or a second prompt template is ever genuinely in play at once (A/B
+testing a prompt, comparing two quantizations side by side) — the point at which a Git-based
+manifest's "one declared entry per backend" shape stops being enough and MLflow's actual run-
+tracking/comparison features would earn their operational cost; or Phase 17 (AI evaluation)
+needs to join evaluation scores to a specific prompt/model version, which may be the real forcing
+function this project's own roadmap already anticipates MLflow for. Also revisit once the
+target-machine confirmation above actually happens — the same "real cluster is the only real
+proof" discipline every earlier Kubernetes-facing phase in this project has followed.
+
 ## Template for a new record
 
 ```

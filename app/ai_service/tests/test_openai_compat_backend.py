@@ -65,6 +65,29 @@ async def test_request_is_a_non_streaming_chat_completion() -> None:
     }
 
 
+async def test_system_prompt_becomes_a_leading_system_role_message() -> None:
+    # Phase 16 (ADR-37): a real "system" role message, not text concatenated into the user
+    # turn -- see generate()'s own docstring for why.
+    backend, seen = _backend(_ok())
+
+    await backend.generate("Explain pods", system_prompt="Be concise.")
+
+    (request,) = seen
+    assert json.loads(request.content)["messages"] == [
+        {"role": "system", "content": "Be concise."},
+        {"role": "user", "content": "Explain pods"},
+    ]
+
+
+async def test_no_system_prompt_means_no_system_message_at_all() -> None:
+    backend, seen = _backend(_ok())
+
+    await backend.generate("Explain pods", system_prompt=None)
+
+    (request,) = seen
+    assert json.loads(request.content)["messages"] == [{"role": "user", "content": "Explain pods"}]
+
+
 async def test_api_key_is_sent_as_bearer_token_only_when_configured() -> None:
     with_key, seen_with = _backend(_ok(), api_key="k-123")
     without_key, seen_without = _backend(_ok())

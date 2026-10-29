@@ -29,6 +29,21 @@ class Settings(BaseSettings):
     # allow-list). "local" by default so a developer's own laptop is never mistaken for "dev".
     environment: str = Field(default="local", min_length=1, max_length=32)
 
+    # --- Governance (Phase 16, ADR-37): facts only the Helm chart actually knows, not
+    # something this process could compute or guess for itself. Both default to "unset" outside
+    # Helm (a bare `docker run`, a developer's own `make app-run`, every test in this suite) --
+    # a clearly-wrong-looking sentinel on purpose, never a fabricated version string, so a
+    # response/meta field showing "unset" is an honest signal, not a silent gap. ---
+    # helm/ai-platform/templates/configmap.yaml sets this to .Values.image.tag -- the exact
+    # image actually running, the same tag scripts/deploy/helm.sh computed and
+    # scripts/build/image.sh published, never a value this process could know on its own.
+    deployment_version: str = Field(default="unset", min_length=1, max_length=128)
+    # helm/ai-platform/templates/configmap.yaml sets this to .Chart.Version -- Chart.yaml's own
+    # "bump on any template/values-shape change" field (see its comment), reused rather than
+    # duplicated: a second, independently-maintained config-schema version number would be
+    # exactly the kind of value that can go stale this project's own discipline avoids.
+    config_version: str = Field(default="unset", min_length=1, max_length=32)
+
     # --- Observability (Phase 9): metrics are always on; traces and logs are opt-in because
     # they need somewhere to send OTLP data to. See ai_service/telemetry.py. ---
     otel_enabled: bool = False

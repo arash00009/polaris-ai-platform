@@ -476,3 +476,35 @@ GitHub Actions run before a cluster-side check is even possible, unlike every ea
 | 4. Scale | Zero marginal cost per Pod beyond the one admission check Kyverno already does — a second signed image repository is a second line in the same policy's `imageReferences` list, not a new mechanism. |
 | 5. Security | **Named honestly, not glossed over:** today this policy has nothing to actually enforce against the real, running cluster, because nothing `polaris-dev` deploys ever matches `ghcr.io/<owner>/<repo>/ai-service` — see `docs/security/admission-policy.md` §3. What is confirmed (once a real signed digest exists) is that the *mechanism* works correctly against a direct reference to that real, signed image; wiring an actual environment to deploy from GHCR instead of the local registry is a materially bigger, deliberately out-of-scope change (ADR-36's own "Revisit when"). |
 | 6. Cloud | The same `verifyImages` mechanism is how a production cluster would actually gate `kubectl apply`/CD pipelines on signature verification before the gap named above is closed — Kyverno's own production deployments (per its docs) typically run this exact rule shape against a real, GHCR-or-equivalent-backed deployment path, which is precisely the "Revisit when" this project names rather than fakes having already done. |
+
+## Phase 16
+
+Status: **unit-tested in the sandbox, 2026-10-29 — not yet confirmed on the target machine.**
+183 tests pass in `app/ai_service`, coverage is 99.32 % (the 95 % gate), `ruff check`/
+`ruff format --check` are clean. Not yet confirmed: a real `helm upgrade` on Darya actually
+injecting `POLARIS_DEPLOYMENT_VERSION`/`POLARIS_CONFIG_VERSION` into a running Pod, and
+`GET /v1/meta`/the `ai_service_governance_info` Prometheus metric showing real, non-`"unset"`
+values there — this sandbox has no `helm` binary and no cluster. Full record:
+`docs/ai-governance.md`, ADR-37.
+
+### Declared-vs-actual governance manifest and drift detection
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Nothing before this phase recorded *which* model/prompt version this project meant to be running, only what a backend happened to self-report (`BackendResult.model`, since Phase 11). A model silently swapped, a different quantization pulled, or a prompt edited without anyone noticing had no mechanism that would ever catch it. |
+| 2. Why | A small, git-tracked `ai_service/governance/manifest.json` declares, per backend, the "governed" model version and the active prompt-template version, loaded once at startup (`load_governance_info()`). Every `/v1/chat` request compares the declared version against the backend's own self-reported `model` and logs a `WARNING`-level "governance drift detected" line on a mismatch — never raises, since a mismatch should make the gap visible, not turn a working answer into a failed request. |
+| 3. Failure | A missing or malformed manifest, or an active backend with no declared entry in it, fails the process at startup rather than silently guessing a version — caught the same way a bad config value in any earlier phase is caught, not deferred to a confusing runtime error later. A genuine drift (backend answers with an undeclared model) is caught per-request by the comparison in `main.py`'s `chat()`, exercised directly by `test_a_backend_that_answers_with_an_undeclared_model_logs_governance_drift`. |
+| 4. Scale | Zero marginal cost per request beyond one dict lookup and one string comparison already in the hot path; a second backend or a second model is one more line in the manifest's `models` map, not a new mechanism. |
+| 5. Security | No new secret or credential surface — the manifest is plain, non-sensitive, git-tracked JSON, reviewable in a pull request like any other config change. |
+| 6. Cloud | The same declared-vs-actual comparison pattern is how a production model gateway (LiteLLM, a cloud provider's own model registry) flags a deployment serving a different model version than its own config declares — this project's manifest is the same idea at the scale a single demonstration backend actually needs. |
+
+### Git-based manifest, not MLflow
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | `docs/architecture.md`'s own Phase 16 "Done when" wording explicitly requires "the MLflow decision recorded" — a model/prompt registry needs *some* storage mechanism, and MLflow is the named default candidate in the roadmap. |
+| 2. Why | This project has exactly one model per backend and one prompt template active at a time, so a few git-tracked files already give a registry everything it needs to prove at this scale: a single declared source of truth, versioned by git history itself, diffable in a pull request, comparable against what actually answered a request. MLflow would mean a second persistent service (its own tracking server, a SQLite/Postgres backend, a new namespace, a new Helm release to operate) for a need this project does not yet have. |
+| 3. Failure | There is no new failure mode introduced by *not* running MLflow — the manifest fails the same way any other git-tracked config file in this project fails: a bad commit is caught by review/CI, not at runtime by a second service being unreachable. |
+| 4. Scale | Does not scale to A/B-testing two prompts or two model versions *concurrently* — the manifest only ever declares one "governed" version per backend at a time. Named explicitly in ADR-37's "Revisit when" as the condition that would reopen this decision. |
+| 5. Security | One fewer running service is one fewer thing to patch, expose, and secure — consistent with this project's "every piece of infrastructure needs a proven need" discipline already applied to OpenCost over Kubecost (ADR-31) and Sealed Secrets over Vault (ADR-33). |
+| 6. Cloud | A real production deployment comparing multiple concurrent model/prompt versions, or needing to join evaluation scores to a specific version (Phase 17's own named need), is exactly the forcing function that would make MLflow (or an equivalent experiment-tracking service) worth its operational cost — named as the reopening condition, not built pre-emptively. |

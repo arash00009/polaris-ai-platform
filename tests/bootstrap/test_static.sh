@@ -1724,5 +1724,77 @@ else
   bad "README.md's Phase 15 status row does not mention session 2"
 fi
 
+# --- Phase 16: AI governance (declared model/prompt/deployment/config version registry) -------
+# Pure-Python side is fully exercised by app/ai_service's own pytest suite (183 tests, 99.32%
+# coverage) -- these checks only verify the sandbox-side shape: the manifest exists and parses,
+# it does not silently drift from versions.env, and the Helm/doc/ADR trail is all actually there.
+# The Helm-chart half (a real helm upgrade injecting these values into a running Pod) is
+# explicitly NOT checked here -- this sandbox has no helm binary and no cluster; see
+# docs/ai-governance.md section 6.
+
+# 135. the governance manifest and its prompt file exist and the manifest parses as valid JSON
+GOV_DIR="app/ai_service/src/ai_service/governance"
+if [[ -f "$GOV_DIR/manifest.json" && -f "$GOV_DIR/prompts/v1-system.txt" ]]; then
+  ok "exists: $GOV_DIR/manifest.json and $GOV_DIR/prompts/v1-system.txt"
+else
+  bad "$GOV_DIR is missing manifest.json or prompts/v1-system.txt"
+fi
+if python3 -c "import json, sys; json.load(open(sys.argv[1]))" "$GOV_DIR/manifest.json" 2>/dev/null; then
+  ok "$GOV_DIR/manifest.json parses as valid JSON"
+else
+  bad "$GOV_DIR/manifest.json is missing or does not parse as valid JSON"
+fi
+
+# 136. manifest.json's models.openai_compat must equal versions.env's OLLAMA_MODEL exactly -- the
+# declared version and the thing scripts/bootstrap actually install must never silently drift
+# apart, same discipline as check 86's values-dev.yaml/OLLAMA_MODEL comparison
+GOV_OPENAI_MODEL="$(python3 -c "import json; print(json.load(open('$GOV_DIR/manifest.json'))['models']['openai_compat'])" 2>/dev/null || true)"
+if [[ -n "$GOV_OPENAI_MODEL" && "$GOV_OPENAI_MODEL" == "${OLLAMA_MODEL:-__unset__}" ]]; then
+  ok "manifest.json's models.openai_compat matches versions.env's OLLAMA_MODEL ($GOV_OPENAI_MODEL)"
+else
+  bad "manifest.json's models.openai_compat ('$GOV_OPENAI_MODEL') must equal versions.env's OLLAMA_MODEL ('${OLLAMA_MODEL:-}') exactly"
+fi
+
+# 137. pyproject.toml actually ships the manifest/prompt files inside the built wheel -- a
+# package-data declaration that silently stops matching real files would build a wheel with no
+# governance directory inside it and fail only at runtime, inside the real container image
+if grep -q 'ai_service = \["governance/manifest.json", "governance/prompts/\*.txt"\]' app/ai_service/pyproject.toml; then
+  ok "pyproject.toml's [tool.setuptools.package-data] ships governance/manifest.json and governance/prompts/*.txt"
+else
+  bad "app/ai_service/pyproject.toml is missing the governance package-data declaration"
+fi
+
+# 138. helm/ai-platform/templates/configmap.yaml injects both new values from the real sources
+# named in docs/ai-governance.md (image.tag / Chart.Version), never a hardcoded placeholder
+CM="helm/ai-platform/templates/configmap.yaml"
+if grep -q 'POLARIS_DEPLOYMENT_VERSION:.*\.Values\.image\.tag' "$CM" && grep -q 'POLARIS_CONFIG_VERSION:.*\.Chart\.Version' "$CM"; then
+  ok "$CM sets POLARIS_DEPLOYMENT_VERSION from .Values.image.tag and POLARIS_CONFIG_VERSION from .Chart.Version"
+else
+  bad "$CM is missing POLARIS_DEPLOYMENT_VERSION (from .Values.image.tag) or POLARIS_CONFIG_VERSION (from .Chart.Version)"
+fi
+
+# 139. README.md / ADR / docs/ai-governance.md / docs/component-qa.md all gained Phase 16
+# material -- same pattern as check 134's Phase 15 session 2 equivalent
+if grep -q 'ADR-37' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-37"
+else
+  bad "docs/adr/README.md is missing ADR-37 (AI governance)"
+fi
+if [[ -f docs/ai-governance.md ]]; then
+  ok "docs/ai-governance.md exists"
+else
+  bad "docs/ai-governance.md is missing"
+fi
+if grep -qi 'phase 16' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 16 section"
+else
+  bad "docs/component-qa.md is missing a Phase 16 section"
+fi
+if grep -E '^\| 16' README.md | grep -qvi 'planned'; then
+  ok "README.md's Phase 16 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 16 status row still says Planned (or the row is missing/reworded)"
+fi
+
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
 [[ "$FAILED" -eq 0 ]]

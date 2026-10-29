@@ -32,10 +32,19 @@ class OpenAICompatBackend(ModelBackend):
             client = httpx.AsyncClient(base_url=base_url, timeout=timeout_s, headers=headers)
         self._client = client
 
-    async def generate(self, prompt: str) -> BackendResult:
+    async def generate(self, prompt: str, *, system_prompt: str | None = None) -> BackendResult:
+        # Phase 16 (ADR-37): a real "system" role message, not text concatenated into the user
+        # turn -- the OpenAI chat-completions shape (which Ollama/vLLM speak too) already has a
+        # dedicated role for exactly this, and using it is what makes the governance manifest's
+        # prompt template an actual instruction the model sees distinctly, not a guess about how
+        # the model will parse a blob of mixed text.
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
         payload = {
             "model": self._model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": False,
         }
         # Error messages below never include the upstream response body or the URL: they can

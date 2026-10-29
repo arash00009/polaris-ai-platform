@@ -33,6 +33,29 @@ class ChatResponse(BaseModel):
     request_id: str
     # Time spent in the model backend call, in milliseconds (not the whole HTTP request).
     latency_ms: float
+    # Phase 16 (ADR-37): the governance manifest's declared versions -- see ai_service/
+    # governance and docs/ai-governance.md. "model_version" is the *declared* version (the
+    # governance manifest's entry for the active backend); "model" above stays the backend's
+    # own *self-reported* answer (Phase 11) -- a mismatch between the two is exactly the
+    # "governance drift" main.py's chat() handler logs a warning for.
+    model_version: str
+    prompt_version: str
+    deployment_version: str
+    config_version: str
+
+
+class MetaResponse(BaseModel):
+    """Body of GET /v1/meta -- the governance record (Phase 16, ADR-37), as a response, not
+    only as logs/traces/the Prometheus info metric.
+
+    See docs/architecture.md section 6's "Governance record" row and docs/ai-governance.md.
+    """
+
+    model_version: str
+    prompt_version: str
+    deployment_version: str
+    config_version: str
+    environment: str
 
 
 class StatusResponse(BaseModel):

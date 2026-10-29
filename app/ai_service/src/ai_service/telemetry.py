@@ -174,11 +174,12 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-from prometheus_client import CollectorRegistry, Counter
+from prometheus_client import CollectorRegistry, Counter, Gauge
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from ai_service import __version__
 from ai_service.config import Settings
+from ai_service.governance import GovernanceInfo
 from ai_service.logging_setup import LOG_FIELDS
 
 # Deliberately not opentelemetry.trace.set_tracer_provider() / opentelemetry._logs.set_logger_
@@ -215,22 +216,26 @@ class FinOpsMetrics(NamedTuple):
 
 
 # Phase 10: docs/architecture.md section 6's trace/log attribute allow-list, the names as they
-# appear on an exported span after _FilteringSpanExporter below has run. Two allow-listed names
-# are deliberately never set anywhere in this codebase yet and are documented as a known gap
-# rather than faked: "model_version" and "prompt_version" have no source of truth -- MockBackend
-# has no versioning concept beyond its name string, and there is no prompt-template system yet.
-# "env" and "deployment_version" are not span attributes at all: they are the
-# "deployment.environment"/"service.version" *Resource* attributes set once below and attached
-# automatically to every span/log a provider exports, which is exactly what the architecture
-# doc's own cardinality section (section 9) means by "bounded" -- there is nothing per-span to
-# curate for either one.
+# appear on an exported span after _FilteringSpanExporter below has run. "model_version" and
+# "prompt_version" were reserved here before either had a source of truth -- Phase 16 (ADR-37)
+# gives them one (ai_service/governance's manifest) and main.py's chat() handler now sets both
+# via _set_span_attributes() on every request, the same way "model"/"latency_ms" already were.
+# "env" and "deployment_version" are still not span attributes at all: they are the
+# "deployment.environment"/"deployment_version" *Resource* attributes set once below and
+# attached automatically to every span/log a provider exports, which is exactly what the
+# architecture doc's own cardinality section (section 9) means by "bounded" -- there is nothing
+# per-span to curate for either one. "config_version" is deliberately not in this allow-list at
+# all: docs/architecture.md section 6 fixed this list in Phase 0 without it, and a Helm chart's
+# schema version (what config_version actually tracks -- see config.py) changes far less often
+# than a deployment does, so tracing it per-request would add nothing a response body/`/v1/meta`
+# field does not already give; see ADR-37.
 SPAN_ATTRIBUTE_ALLOWLIST: Final[frozenset[str]] = frozenset(
     {
         "tenant_id",
         "request_id",
         "model",
-        "model_version",  # never set yet -- see comment above
-        "prompt_version",  # never set yet -- see comment above
+        "model_version",
+        "prompt_version",
         "endpoint",  # renamed from the auto-instrumentation's "http.route"
         "http.status_code",
         "latency_ms",
@@ -323,10 +328,14 @@ _RESERVED_LOG_RECORD_ATTRS: Final[frozenset[str]] = frozenset(
 )
 
 
-def setup_telemetry(app: FastAPI, settings: Settings) -> None:
+def setup_telemetry(app: FastAPI, settings: Settings, governance: GovernanceInfo) -> None:
     """Call once from create_app(), after configure_logging(). Safe to call every time the app
     is built (including in tests): metrics cost nothing, and tracing/logging only activate when
     POLARIS_OTEL_ENABLED is true.
+
+    ``governance`` (Phase 16, ADR-37) is main.py's already-loaded GovernanceInfo -- passed in,
+    not loaded again here, for the same reason create_app() already builds Settings/the backend
+    once and hands them around rather than re-constructing them in every module that needs one.
     """
     # Metrics: unconditional. A histogram/counter in memory until something scrapes /metrics.
     # A dedicated CollectorRegistry, not prometheus_client's process-global default one: without
@@ -370,6 +379,28 @@ def setup_telemetry(app: FastAPI, settings: Settings) -> None:
         ),
     )
 
+    # Phase 16 (ADR-37): the governance record's Prometheus half -- docs/architecture.md section
+    # 6 calls for "Manifest in Git + a /v1/meta endpoint + a Prometheus info metric", and this is
+    # the third of those. A Gauge fixed at 1 with the version strings as *labels*, never as the
+    # value -- the standard Prometheus "info metric" pattern (kube_pod_info,
+    # node_exporter_build_info, ...): one series, set once at startup, never incremented or
+    # observed again. Cardinality-safe for the same reason "env"/"deployment_version" are
+    # Resource attributes and not per-span ones above -- these values change once per process
+    # lifetime (a new deploy, not a new request), so one series per running pod is the entire
+    # cost, unconditional like the counters above (metrics are never gated on otel_enabled).
+    Gauge(
+        "ai_service_governance_info",
+        "Fixed at 1; labels carry the declared model/prompt/deployment/config version "
+        "this process is running (Phase 16, ADR-37).",
+        ["model_version", "prompt_version", "deployment_version", "config_version"],
+        registry=registry,
+    ).labels(
+        model_version=governance.declared_model_version(settings.backend),
+        prompt_version=governance.prompt_version,
+        deployment_version=settings.deployment_version,
+        config_version=settings.config_version,
+    ).set(1)
+
     if not settings.otel_enabled:
         return
 
@@ -378,6 +409,13 @@ def setup_telemetry(app: FastAPI, settings: Settings) -> None:
             "service.name": SERVICE_NAME,
             "service.version": __version__,
             "deployment.environment": settings.environment,
+            # Phase 16 (ADR-37): a Resource attribute, not a per-span one -- see
+            # SPAN_ATTRIBUTE_ALLOWLIST's comment above for why. Undotted ("deployment_version",
+            # not e.g. "deployment.version"): matches docs/architecture.md section 6's own
+            # literal allow-list wording, deliberately distinct from "service.version" above
+            # (ai_service's own semver, bumped by hand per phase) -- this is the exact image tag
+            # actually running, Helm-injected, never guessed.
+            "deployment_version": settings.deployment_version,
         }
     )
     endpoint = settings.otel_exporter_otlp_endpoint.rstrip("/")

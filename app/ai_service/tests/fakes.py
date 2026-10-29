@@ -20,10 +20,12 @@ class FakeBackend(ModelBackend):
         self.ready_error = ready_error
         self.ready_delay_s = ready_delay_s
         self.prompts: list[str] = []
+        self.system_prompts: list[str | None] = []
         self.closed = False
 
-    async def generate(self, prompt: str) -> BackendResult:
+    async def generate(self, prompt: str, *, system_prompt: str | None = None) -> BackendResult:
         self.prompts.append(prompt)
+        self.system_prompts.append(system_prompt)
         if self.error is not None:
             raise self.error
         return BackendResult(

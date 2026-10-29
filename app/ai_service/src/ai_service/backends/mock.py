@@ -81,7 +81,13 @@ class MockBackend(ModelBackend):
         if not self._ready:
             raise BackendError("mock backend: not ready")
 
-    async def generate(self, prompt: str) -> BackendResult:
+    async def generate(self, prompt: str, *, system_prompt: str | None = None) -> BackendResult:
+        # Phase 16 (ADR-37): accepted, deliberately unused -- this backend's answers are a
+        # deterministic lookup over `prompt` alone (see this module's own docstring), so a
+        # governance-manifest system prompt has nothing to change here. Accepting the parameter
+        # (rather than omitting it and relying on ModelBackend's default) keeps every real call
+        # site in main.py uniform across backends, with no "does this one support it" branching.
+        del system_prompt
         if self._latency_ms:
             await asyncio.sleep(self._latency_ms / 1000)
         # A failure is decided after the wait, like a real backend that fails slowly.

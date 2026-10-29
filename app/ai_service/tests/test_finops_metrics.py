@@ -144,7 +144,7 @@ def test_a_backend_that_reports_no_token_counts_is_simply_absent_from_ai_tokens_
     from ai_service.backends import BackendResult
 
     class _NoCounts(FakeBackend):
-        async def generate(self, prompt: str) -> BackendResult:
+        async def generate(self, prompt: str, *, system_prompt: str | None = None) -> BackendResult:
             return BackendResult(text="ok", model="no-counts-1")
 
     with TestClient(create_app(Settings(), backend=_NoCounts())) as no_counts_client:

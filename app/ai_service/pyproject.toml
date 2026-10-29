@@ -27,6 +27,15 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Phase 16: the governance manifest and its one prompt-template file (ai_service/governance/)
+# are data, not Python code, and setuptools does not include non-.py files in a found package by
+# default -- without this, `pip install .` would silently drop manifest.json/prompts/v1-
+# system.txt from the built wheel, and load_governance_info() would fail at container startup
+# with no local way to have caught it first (the Dockerfile's build context has no repository-
+# root fallback to read them from instead -- see ADR-37).
+[tool.setuptools.package-data]
+ai_service = ["governance/manifest.json", "governance/prompts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"

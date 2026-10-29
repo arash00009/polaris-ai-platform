@@ -13,7 +13,17 @@ type: application
 # Chart version: bump on any template/values-shape change. Independent of appVersion below.
 # 0.2.0 (Phase 9): new servicemonitor.yaml template, new values (serviceMonitor.*,
 # networkPolicy.allowScrapeFromNamespace, config.POLARIS_OTEL_*, config.POLARIS_ENVIRONMENT).
-version: 0.2.0
+# Honest gap, named rather than quietly patched over: this field was not actually bumped for
+# Phases 12-15's own real template/values-shape changes (gateway-*.yaml, finops counters,
+# tenant-limits JSON, sealed-secrets/egress NetworkPolicy additions) -- found only now, while
+# wiring Phase 16's POLARIS_CONFIG_VERSION (ai_service/config.py, ADR-37) to reuse this exact
+# field rather than invent a second, independently-maintained one. Not reconstructed
+# retroactively (there is no reliable way to assign the right historical value to each of those
+# four phases after the fact); 0.3.0 below is honestly only "config shape as of Phase 16",
+# resuming the discipline from here, not claiming to repair the Phase 12-15 gap in the past.
+# 0.3.0 (Phase 16): templates/configmap.yaml gained POLARIS_DEPLOYMENT_VERSION/
+# POLARIS_CONFIG_VERSION.
+version: 0.3.0
 # Informational only (shown by `helm list`, not used by any template). The real image tag that
 # gets deployed is always computed by scripts/deploy/helm.sh from git, exactly like Phase 4's
 # app_version()/app_revision() in scripts/build/image.sh and scripts/deploy/app.sh — this field

@@ -57,6 +57,16 @@ LOG_FIELDS: Final[tuple[str, ...]] = (
     # Phase 10: log<->trace correlation. See TraceContextFilter below.
     "trace_id",
     "span_id",
+    # Phase 16 (ADR-37): the governance manifest's declared model/prompt version (set on every
+    # "chat completed"/"chat failed" log line, main.py's chat() handler), and the field a
+    # governance-drift warning carries alongside "model" when the backend's own self-reported
+    # answer does not match what was declared. deployment_version/config_version are
+    # deliberately NOT here -- see telemetry.py's SPAN_ATTRIBUTE_ALLOWLIST comment for why they
+    # are Resource-level facts, set once per process, not a per-line field to repeat on every
+    # log call.
+    "model_version",
+    "prompt_version",
+    "declared_model_version",
 )
 
 

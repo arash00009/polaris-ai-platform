@@ -11,3 +11,12 @@ data:
   {{- range $key, $value := .Values.config }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
+  # Phase 16 (ADR-37): facts only this chart/release actually knows -- never put in the flat
+  # `config` map above, because both are derived from chart context, not a static per-
+  # environment setting someone would tune in values-<env>.yaml. POLARIS_DEPLOYMENT_VERSION is
+  # the exact image tag this release runs (scripts/deploy/helm.sh's own `--set image.tag=...`);
+  # POLARIS_CONFIG_VERSION reuses Chart.yaml's own version field (see its comment: "bump on any
+  # template/values-shape change") rather than computing a second, independently-maintained
+  # config-schema number that could drift from it.
+  POLARIS_DEPLOYMENT_VERSION: {{ required "image.tag is required" .Values.image.tag | quote }}
+  POLARIS_CONFIG_VERSION: {{ .Chart.Version | quote }}

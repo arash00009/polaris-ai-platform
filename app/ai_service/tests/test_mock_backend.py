@@ -43,6 +43,17 @@ async def test_model_name_and_token_estimates() -> None:
     assert result.completion_tokens > 0
 
 
+async def test_system_prompt_is_accepted_and_has_no_effect_on_the_deterministic_answer() -> None:
+    # Phase 16 (ADR-37): MockBackend's answers are a deterministic lookup over the user prompt
+    # alone (this module's own docstring) -- a governance-manifest system prompt is accepted,
+    # for a uniform ModelBackend call site in main.py, but never changes what comes back.
+    with_prompt = await MockBackend().generate(
+        "Explain Kubernetes pods", system_prompt="Be extremely formal."
+    )
+    without_prompt = await MockBackend().generate("Explain Kubernetes pods")
+    assert with_prompt == without_prompt
+
+
 async def test_latency_is_simulated_with_a_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     waited: list[float] = []
 

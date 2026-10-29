@@ -1,0 +1,12 @@
+{
+  "_comment": "Polaris AI Platform governance manifest (Phase 16, ADR-37). The single, git-tracked, declared record of which model and prompt-template version this project calls 'governed' for each backend. ai_service/governance/__init__.py loads this at startup; main.py's /v1/chat handler compares the declared model version here against ModelBackend's own self-reported BackendResult.model on every request, and logs a governance-drift warning on a mismatch -- a deliberate Git-based manifest, not MLflow; see ADR-37 for why and when that would change. JSON, not YAML: PyYAML is not a dependency of ai_service anywhere else, and the stdlib json module does the same job for one small file without adding a new pinned dependency and a new supply-chain surface for Trivy to scan -- the same 'every dependency needs a purpose' discipline already applied throughout this project. 'models' is keyed by Settings.backend (ai_service/config.py): the declared model version for whichever backend is actually selected at runtime. 'models.openai_compat' must equal versions.env's OLLAMA_MODEL -- checked for real by tests/bootstrap/test_static.sh, not just by this comment.",
+  "schema_version": 1,
+  "prompt": {
+    "version": "v1",
+    "file": "prompts/v1-system.txt"
+  },
+  "models": {
+    "mock": "mock-1",
+    "openai_compat": "llama3.2:1b-instruct-q4_K_M"
+  }
+}

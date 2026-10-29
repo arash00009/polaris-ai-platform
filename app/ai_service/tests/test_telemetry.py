@@ -86,6 +86,23 @@ def test_metrics_requests_are_treated_as_probe_traffic_in_the_access_log(
     assert '"path": "/metrics"' not in capsys.readouterr().out
 
 
+def test_governance_info_metric_carries_the_declared_versions(client: TestClient) -> None:
+    # Phase 16 (ADR-37): the Prometheus half of the governance record (docs/architecture.md
+    # section 6) -- a Gauge fixed at 1, labels carrying the declared versions, never
+    # incremented. "unset" for deployment_version/config_version: nothing in this test sets the
+    # Helm-injected POLARIS_DEPLOYMENT_VERSION/POLARIS_CONFIG_VERSION env vars.
+    from ai_service.governance import load_governance_info
+
+    governance = load_governance_info()
+    text = client.get("/metrics").text
+    assert (
+        "ai_service_governance_info{"
+        f'config_version="unset",deployment_version="unset",'
+        f'model_version="{governance.declared_model_version("mock")}",'
+        f'prompt_version="{governance.prompt_version}"}} 1.0' in text
+    )
+
+
 # ---- POLARIS_OTEL_ENABLED=false (the default): nothing extra happens -------------------------
 
 

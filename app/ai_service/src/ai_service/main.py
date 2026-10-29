@@ -23,6 +23,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from ai_service import __version__
 from ai_service.backends import BackendError, BackendTimeout, ModelBackend, build_backend
 from ai_service.config import Settings
+from ai_service.governance import load_governance_info
 from ai_service.logging_setup import configure_logging
 from ai_service.schemas import (
     ChatRequest,
@@ -30,6 +31,7 @@ from ai_service.schemas import (
     ErrorBody,
     ErrorDetail,
     ErrorResponse,
+    MetaResponse,
     StatusResponse,
 )
 from ai_service.telemetry import setup_telemetry, shutdown_telemetry
@@ -94,6 +96,14 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
     """Build the app. ``settings`` and ``backend`` can be injected, which keeps tests simple."""
     settings = settings or Settings()
     configure_logging(settings.log_level, settings.log_format)
+    # Phase 16 (ADR-37): loaded once per app instance, here -- the same place Settings() and
+    # (below) the backend are constructed. Raises GovernanceManifestError straight out of
+    # create_app() on a missing/malformed manifest or an active backend with no declared entry:
+    # a deployment with a broken governance manifest should fail to start, the same "never
+    # guess, fail closed" outcome config.py's own _openai_needs_a_model validator already gives
+    # a missing POLARIS_OPENAI_MODEL.
+    governance = load_governance_info()
+    declared_model_version = governance.declared_model_version(settings.backend)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -106,11 +116,13 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
 
     app = FastAPI(title="Polaris AI service", version=__version__, lifespan=lifespan)
     app.state.settings = settings
+    app.state.governance = governance
+    app.state.declared_model_version = declared_model_version
     # Metrics (always) and, if POLARIS_OTEL_ENABLED, traces/logs (see ai_service/telemetry.py).
     # Done before any other middleware is registered, same as upstream's own recommendation for
     # both instrumentors: prometheus-fastapi-instrumentator's request middleware and
     # OpenTelemetry's ASGI wrapper both want to see the request before anything else touches it.
-    setup_telemetry(app, settings)
+    setup_telemetry(app, settings, governance)
 
     @app.middleware("http")
     async def request_id_middleware(
@@ -191,9 +203,19 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
         # about (Phase 10, docs/architecture.md section 6's allow-list).
         _set_span_attributes(tenant_id=body.tenant_id, request_id=request_id)
         started = time.perf_counter()
+        governance = request.app.state.governance
+        declared_model_version = request.app.state.declared_model_version
+        # Phase 16 (ADR-37): set before the backend is even called, same reasoning as the two
+        # attributes above -- the declared model/prompt version is known before any backend call
+        # happens, so even a timed-out or failed request's span/logs should carry it.
+        _set_span_attributes(
+            model_version=declared_model_version, prompt_version=governance.prompt_version
+        )
         try:
             async with asyncio.timeout(settings.backend_timeout_s):
-                result = await request.app.state.backend.generate(body.prompt)
+                result = await request.app.state.backend.generate(
+                    body.prompt, system_prompt=governance.system_prompt
+                )
         except (TimeoutError, BackendTimeout) as exc:
             # The prompt is deliberately never logged: it can hold personal data.
             logger.warning(
@@ -202,6 +224,8 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                     "request_id": request_id,
                     "tenant_id": body.tenant_id,
                     "code": "backend_timeout",
+                    "model_version": declared_model_version,
+                    "prompt_version": governance.prompt_version,
                 },
             )
             # Phase 13: counted even on failure -- a tenant whose requests keep timing out is
@@ -222,6 +246,8 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                     "tenant_id": body.tenant_id,
                     "code": "backend_error",
                     "reason": str(exc),
+                    "model_version": declared_model_version,
+                    "prompt_version": governance.prompt_version,
                 },
             )
             request.app.state.finops_metrics.requests_total.labels(
@@ -239,6 +265,8 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                 "latency_ms": latency_ms,
                 "prompt_tokens": result.prompt_tokens,
                 "completion_tokens": result.completion_tokens,
+                "model_version": declared_model_version,
+                "prompt_version": governance.prompt_version,
             },
         )
         _set_span_attributes(model=result.model, latency_ms=latency_ms)
@@ -246,6 +274,23 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             _set_span_attributes(prompt_tokens=result.prompt_tokens)
         if result.completion_tokens is not None:
             _set_span_attributes(completion_tokens=result.completion_tokens)
+        # Phase 16 (ADR-37): the entire point of a declared model registry -- a backend that
+        # answers with something other than what the governance manifest declares for it is
+        # exactly the drift a registry exists to catch (a different quantization pulled, a model
+        # swapped without the manifest being updated to match). Logged, never raised: a real
+        # mismatch should not turn a successful answer into a failed request, only make the gap
+        # visible to whoever reads the logs.
+        if result.model != declared_model_version:
+            logger.warning(
+                "governance drift detected: backend answered with a different model than the "
+                "governance manifest declares",
+                extra={
+                    "request_id": request_id,
+                    "tenant_id": body.tenant_id,
+                    "model": result.model,
+                    "declared_model_version": declared_model_version,
+                },
+            )
 
         # Phase 13 (FinOps): the three cost-attribution counters, success path. See
         # telemetry.py's module docstring for exactly why these three, with these labels.
@@ -270,6 +315,10 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             model=result.model,
             request_id=request_id,
             latency_ms=latency_ms,
+            model_version=declared_model_version,
+            prompt_version=governance.prompt_version,
+            deployment_version=settings.deployment_version,
+            config_version=settings.config_version,
         )
 
     @app.get("/healthz", response_model=StatusResponse, tags=["probes"])
@@ -303,5 +352,24 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             )
             raise ApiError(503, "not_ready", "The model backend is not ready.") from exc
         return StatusResponse(status="ready")
+
+    @app.get("/v1/meta", response_model=MetaResponse, tags=["governance"])
+    async def meta() -> MetaResponse:
+        """The governance record (Phase 16, ADR-37): which model/prompt/deployment/config
+        version this running process declares itself to be.
+
+        docs/architecture.md section 6's "Governance record" row names this endpoint
+        explicitly, alongside the Git manifest itself and the ai_service_governance_info
+        Prometheus metric (telemetry.py). Not tenant-scoped and not a probe: it answers a
+        question about the deployment, not about a request or a tenant, so it is cheap to call
+        but unlike /healthz/readyz is not expected to be polled every few seconds.
+        """
+        return MetaResponse(
+            model_version=declared_model_version,
+            prompt_version=governance.prompt_version,
+            deployment_version=settings.deployment_version,
+            config_version=settings.config_version,
+            environment=settings.environment,
+        )
 
     return app

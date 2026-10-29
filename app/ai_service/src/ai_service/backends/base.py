@@ -28,8 +28,17 @@ class BackendResult:
 
 class ModelBackend(ABC):
     @abstractmethod
-    async def generate(self, prompt: str) -> BackendResult:
-        """Return an answer for ``prompt`` or raise BackendError / BackendTimeout."""
+    async def generate(self, prompt: str, *, system_prompt: str | None = None) -> BackendResult:
+        """Return an answer for ``prompt`` or raise BackendError / BackendTimeout.
+
+        ``system_prompt`` (Phase 16, ADR-37) is the governance manifest's versioned prompt
+        template (``ai_service/governance``'s ``GovernanceInfo.system_prompt``), passed by
+        ``main.py``'s ``chat()`` handler on every call -- never something a backend reads for
+        itself, the same "the HTTP layer only knows this interface" seam this class's own
+        module docstring already describes. ``None`` is accepted (not required) so a backend
+        with nothing to do with it -- MockBackend, whose deterministic answers do not depend on
+        any prompt text at all -- is not forced to pretend otherwise.
+        """
 
     async def check_ready(self) -> None:  # noqa: B027 - intentionally optional, not abstract
         """Raise BackendError if the backend cannot serve requests right now.
