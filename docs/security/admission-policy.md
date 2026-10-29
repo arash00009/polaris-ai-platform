@@ -122,17 +122,37 @@ GHCR does not implement the native OCI 1.1 Referrers API (confirmed: `GET
 .../referrers/<digest>` returns `MANIFEST_UNKNOWN`), so `cosign sign` (same version, in CI)
 correctly fell back to OCI 1.1's "referrers tag schema" — a tag literally named
 `sha256-<digest>`, no `.sig` suffix — confirmed to exist with a raw, manually-negotiated
-registry API call (anonymous token + `GET` on that exact tag → `200`). Standalone `cosign
-verify` auto-detects and checks that tag by default, which is why it verified cleanly. Kyverno's
-own cosign integration only checks there when `cosignOCI11: true` is set on the rule; left
-unset (the project's original policy template never set it), it only ever looks for the old
-`sha256-<digest>.sig` tag — which this registry never had, because `cosign sign` never created
-it. `.sig` with a raw token-authenticated `GET` had already confirmed that tag does not exist
-(`404`), independently, before this source-level explanation was found.
+registry API call (anonymous token + `GET` on that exact tag → `200`).
 
-**Fix**: added `cosignOCI11: true` to `deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s
-single `verifyImages[]` entry, right beside `failureAction`. This is not CI-ephemeral-specific —
-the real, persistent `polaris-dev` cluster on Darya is what this was tested against — and it is
-specific to this registry's lack of native Referrers API support, not something `--ephemeral`
-or any CI-only path needs to care about. Confirm column updated once a real `make
-kyverno-verify-demo` run passes with the field applied.
+Setting `cosignOCI11: true` and re-applying the policy (confirmed present in the live
+`ClusterPolicy` object, against a freshly-restarted, verified-healthy admission-controller pod)
+**did not fix it** — identical error, identical message. That ruled out `cosignOCI11` itself,
+not just the three causes above.
+
+The actual cause came from fetching the real content of that fallback tag directly (`curl` with
+a real anonymous bearer token, `Accept: application/vnd.oci.image.index.v1+json`): the one
+referrer stored there carries `"artifactType": "application/vnd.dev.sigstore.bundle.v0.3+json"`
+— the modern, unified **Sigstore Bundle** format (certificate, signature, and Rekor entry in one
+object), which is what `cosign sign` v3.1.3 writes by default now. `cosignOCI11`'s own code
+path (`pkg/cosign/verify.go`'s `verifyImageSignaturesExperimentalOCI`, in the vendored cosign
+library) filters referrers by `artifactType: "sig"` — the older "simple signing" type — which
+matches nothing here, errors, and (by cosign's own design: the experimental attempt's error is
+never surfaced, just silently falls through) continues to the legacy `sha256-<digest>.sig` tag
+path, which also fails, since that tag was never created either. Both failures produce the
+identical `"no signatures found"` string from a shared helper function, which is exactly why
+turning `cosignOCI11` on appeared to change nothing.
+
+Kyverno has a *separate* code path built for precisely this format:
+`pkg/image/verifiers/cpol/cosign/sigstore.go`'s `fetchBundles()`, which filters referrers by
+`strings.HasPrefix(manifestDesc.ArtifactType, "application/vnd.dev.sigstore.bundle")` — a
+prefix match against exactly what GHCR is storing. It only runs when `verifyImages[].type` is
+set to `SigstoreBundle` (an enum alongside the default, `Cosign`, and `Notary`). The existing
+`keyless.subject`/`issuer`/`rekor.url` fields are consumed identically by both code paths
+(`sigstore.go`'s own `buildPolicy()`), so nothing else in the policy needed to change.
+
+**Fix**: replaced `cosignOCI11: true` with `type: SigstoreBundle` on
+`deploy/platform/kyverno/policies/verify-ai-service-images.yaml.tmpl`'s single `verifyImages[]`
+entry. This is not CI-ephemeral-specific — the real, persistent `polaris-dev` cluster on Darya
+is what this was tested against — and it is specific to the artifact format this cosign version
+writes by default, not something `--ephemeral` or any CI-only path needs to care about. Confirm
+column updated once a real `make kyverno-verify-demo` run passes with the field applied.

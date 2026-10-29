@@ -52,21 +52,23 @@ spec:
             - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service:*"
             - "ghcr.io/__POLARIS_OWNER_REPO__/ai-service@sha256:*"
           failureAction: Enforce
-          # 2026-10-29: real finding (docs/troubleshooting.md, Phase 15 session 2) -- GHCR does
-          # not implement the native OCI 1.1 Referrers API (confirmed: GET .../referrers/<digest>
-          # returns MANIFEST_UNKNOWN), so cosign (v3.1.3, both in CI's publish job and the
-          # standalone CLI on Darya) correctly falls back to OCI 1.1's "referrers tag schema" --
-          # a tag literally named sha256-<digest>, with NO .sig suffix -- confirmed present via
-          # a raw registry API call. Kyverno's own cosign integration (same cosign/v3 v3.1.2
-          # library, so this is not a version gap) only looks there when told to: see
-          # pkg/image/verifiers/cpol/cosign/cosign.go's buildCosignOptions(), which sets
-          # cosign.CheckOpts.ExperimentalOCI11 from exactly this field and defaults to false
-          # (api/kyverno/v1/image_verification_types.go: "CosignOCI11 ... Defaults to false").
-          # Without it Kyverno only ever checks the old sha256-<digest>.sig convention, which
-          # was never created against this registry -- hence "no signatures found" even though
-          # `make cosign-verify` (real run 40250439366's digest) verifies the exact same image
-          # cleanly. Not CI-ephemeral-specific: this is the real, persistent polaris-dev cluster.
-          cosignOCI11: true
+          # 2026-10-29: real finding (docs/troubleshooting.md and docs/security/admission-policy.md
+          # §6, Phase 15 session 2). Fetched the real referrer stored at this digest on GHCR
+          # directly (raw registry API, via the OCI 1.1 "referrers tag schema" -- a tag literally
+          # named sha256-<digest>, no suffix, since GHCR does not implement the native Referrers
+          # API): its artifactType is "application/vnd.dev.sigstore.bundle.v0.3+json" -- the
+          # modern, unified Sigstore Bundle format cosign v3.1.3 (both CI's publish job and the
+          # standalone CLI) writes by default now, not the older "simple signing" artifact the
+          # default Cosign verifyImages type (and its cosignOCI11 flag, tried first and found
+          # insufficient -- see the dated history in admission-policy.md §6) looks for. Kyverno's
+          # own cosign integration has a separate code path for exactly this format --
+          # pkg/image/verifiers/cpol/cosign/sigstore.go's fetchBundles(), which filters referrers
+          # by `strings.HasPrefix(manifestDesc.ArtifactType, "application/vnd.dev.sigstore.bundle")`
+          # -- but it only runs when `type: SigstoreBundle` is set (api/kyverno/v1's
+          # ImageVerificationType enum; default is "Cosign", which is why this was missed
+          # initially). `keyless.subject`/`issuer`/`rekor.url` below are read identically by both
+          # code paths (sigstore.go's buildPolicy()), so no other field needed to change.
+          type: SigstoreBundle
           attestors:
             - count: 1
               entries:
