@@ -193,7 +193,7 @@ HDIR="helm/ai-platform"
 
 # 23. Chart.yaml and every expected template file exist
 if [[ -f "$HDIR/Chart.yaml" ]]; then ok "$HDIR/Chart.yaml exists"; else bad "$HDIR/Chart.yaml is missing"; fi
-for f in _helpers.tpl namespace.yaml configmap.yaml deployment.yaml service.yaml ingress.yaml poddisruptionbudget.yaml networkpolicy.yaml NOTES.txt; do
+for f in _helpers.tpl namespace.yaml configmap.yaml rollout.yaml service.yaml ingress.yaml poddisruptionbudget.yaml networkpolicy.yaml NOTES.txt; do
   if [[ -f "$HDIR/templates/$f" ]]; then ok "$HDIR/templates/$f exists"; else bad "$HDIR/templates/$f is missing"; fi
 done
 
@@ -247,15 +247,18 @@ else
   ok "no template under $HDIR/templates hardcodes a namespace"
 fi
 
-# 28. deployment.yaml never hardcodes an image reference (must come from values, no 'latest')
-DTPL="$HDIR/templates/deployment.yaml"
+# 28. the ai-service pod template never hardcodes an image reference (must come from values, no
+# 'latest') -- rollout.yaml since Phase 18 (ADR-39), deployment.yaml before it
+DTPL="$HDIR/templates/rollout.yaml"
 if [[ -f "$DTPL" ]] && grep -qE 'image:\s*"?[a-zA-Z0-9.]+/.*:(latest)?"?\s*$' "$DTPL"; then
   bad "$DTPL must not hardcode an image reference or use :latest"
-else
+elif [[ -f "$DTPL" ]]; then
   ok "$DTPL takes its image from values (image.repository/image.tag), no :latest"
+else
+  bad "$DTPL is missing: cannot check its image reference"
 fi
 
-# 29. deployment.yaml still carries the Phase 3/4 hardening fields, now as template lines
+# 29. the ai-service pod template still carries the Phase 3/4 hardening fields, now as template lines
 if [[ -f "$DTPL" ]] \
   && grep -q 'runAsNonRoot: true' "$DTPL" \
   && grep -q 'runAsUser: 10001' "$DTPL" \
@@ -494,11 +497,12 @@ else
   bad "Makefile's lint target must include scripts/verify/*.sh"
 fi
 
-# 50. deployment.yaml carries a checksum/config annotation derived from configmap.yaml, so a
-# ConfigMap-only value change (e.g. `helm upgrade --set config.X=...`) forces a new rollout
-# instead of silently leaving the running pods on their old environment. Discovered missing
-# during Phase 7's first real deliberate-failure test (all six verify checks kept passing
-# because no pod ever restarted) -- see ADR-25 and docs/troubleshooting.md.
+# 50. the ai-service pod template carries a checksum/config annotation derived from
+# configmap.yaml, so a ConfigMap-only value change (e.g. `helm upgrade --set config.X=...`)
+# forces a new rollout instead of silently leaving the running pods on their old environment.
+# Discovered missing during Phase 7's first real deliberate-failure test (all six verify checks
+# kept passing because no pod ever restarted) -- see ADR-25 and docs/troubleshooting.md. Still
+# rollout.yaml's job since Phase 18 (ADR-39) converted this resource from Deployment to Rollout.
 if [[ -f "$DTPL" ]] \
   && grep -q 'checksum/config:' "$DTPL" \
   && grep -q 'configmap.yaml' "$DTPL" \
@@ -779,14 +783,21 @@ else
   bad "helm/ai-platform/values-dev.yaml must set serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED to true"
 fi
 
-# 72. values-staging.yaml/values-prod.yaml do NOT turn these on -- the observability stack is
-# only proved in polaris-dev in this delivery (see those files' own comments)
+# 72. values-staging.yaml/values-prod.yaml keep POLARIS_OTEL_ENABLED off (full traces/logs are
+# still only proved in polaris-dev, Phase 9/ADR-27, untouched) but DO turn serviceMonitor.enabled
+# on -- a real Phase 18 (ADR-39) need, not a reversal of ADR-27's scoping: without it Prometheus
+# never discovers ai-service here, so the AnalysisTemplate always queries an empty series and
+# the canary sits Paused/Inconclusive forever, confirmed for real against polaris-staging,
+# 2026-10-30. staging/prod (not dev) are where canary-demo.sh --good/--bad actually run, since
+# only MockBackend (staging/prod) has the fault-injection knob --bad needs.
 for env in staging prod; do
   f="helm/ai-platform/values-$env.yaml"
-  if grep -q 'POLARIS_OTEL_ENABLED: "true"' "$f" 2>/dev/null || grep -q 'enabled: true' "$f" 2>/dev/null; then
-    bad "$f must not enable serviceMonitor/POLARIS_OTEL_ENABLED yet -- observability is only installed in polaris-dev this phase"
+  if grep -q 'POLARIS_OTEL_ENABLED: "true"' "$f" 2>/dev/null; then
+    bad "$f must not enable POLARIS_OTEL_ENABLED yet -- full traces/logs are only installed in polaris-dev this phase"
+  elif grep -A1 '^serviceMonitor:' "$f" 2>/dev/null | grep -q 'enabled: true'; then
+    ok "$f correctly leaves POLARIS_OTEL_ENABLED off and turns serviceMonitor.enabled on (Phase 18's real need, ADR-39)"
   else
-    ok "$f correctly leaves serviceMonitor/POLARIS_OTEL_ENABLED at their false defaults"
+    bad "$f must set serviceMonitor.enabled: true (Phase 18/ADR-39 -- without it the AnalysisTemplate always sees an empty Prometheus series)"
   fi
 done
 
@@ -1917,6 +1928,175 @@ if grep -E '^\| 17' README.md | grep -qvi 'planned'; then
   ok "README.md's Phase 17 status row has moved on from 'Planned'"
 else
   bad "README.md's Phase 17 status row still says Planned (or the row is missing/reworded)"
+fi
+
+
+# --- Phase 18: progressive delivery (Argo Rollouts canary, analysis-gated) ----------------------
+# A real canary controller, a real canary promoting/aborting and the one-time Deployment->Rollout
+# migration are this phase's target-machine step -- this sandbox has no helm binary, no Docker
+# daemon and no cluster; see docs/progressive-delivery.md. These checks verify the sandbox-side
+# shape: the Rollout/AnalysisTemplate chart pieces exist and are internally consistent, the new
+# k6 load script and the two verify/bootstrap scripts exist and are executable, and the version
+# pins/Makefile targets/docs all gained Phase 18 material.
+
+# 147. ai-service is now a Rollout, not a Deployment: deployment.yaml is gone, rollout.yaml exists
+# and actually declares kind: Rollout (not just a renamed file with the old kind left behind)
+if [[ -f helm/ai-platform/templates/rollout.yaml ]] && ! [[ -f helm/ai-platform/templates/deployment.yaml ]]; then
+  ok "helm/ai-platform/templates/deployment.yaml is gone and rollout.yaml exists"
+else
+  bad "helm/ai-platform/templates/ still has deployment.yaml, or rollout.yaml is missing"
+fi
+if grep -q '^kind: Rollout$' helm/ai-platform/templates/rollout.yaml 2>/dev/null \
+  && grep -q '^apiVersion: argoproj.io/v1alpha1$' helm/ai-platform/templates/rollout.yaml 2>/dev/null; then
+  ok "rollout.yaml declares apiVersion: argoproj.io/v1alpha1, kind: Rollout"
+else
+  bad "rollout.yaml is missing apiVersion: argoproj.io/v1alpha1 or kind: Rollout"
+fi
+if grep -q 'setWeight: 50' helm/ai-platform/templates/rollout.yaml 2>/dev/null \
+  && grep -q 'ai-service-canary-analysis' helm/ai-platform/templates/rollout.yaml 2>/dev/null \
+  && grep -q 'setWeight: 100' helm/ai-platform/templates/rollout.yaml 2>/dev/null; then
+  ok "rollout.yaml's canary strategy is setWeight 50 -> analysis (ai-service-canary-analysis) -> setWeight 100"
+else
+  bad "rollout.yaml is missing the setWeight 50 -> analysis -> setWeight 100 canary steps"
+fi
+
+# 148. the AnalysisTemplate exists, parses as YAML, and both metrics define successCondition AND
+# failureCondition (ADR-39: a successCondition alone scores an empty Prometheus result Failed,
+# not Inconclusive)
+ANALYSIS_TEMPLATE="helm/ai-platform/templates/analysistemplate.yaml"
+if [[ -f "$ANALYSIS_TEMPLATE" ]] && have helm && helm template ai-platform-static-check helm/ai-platform \
+  --show-only templates/analysistemplate.yaml >/dev/null 2>&1; then
+  ok "$ANALYSIS_TEMPLATE renders cleanly with helm template"
+elif [[ -f "$ANALYSIS_TEMPLATE" ]]; then
+  ok "$ANALYSIS_TEMPLATE exists (helm not available in this sandbox to render it -- see docs/progressive-delivery.md)"
+else
+  bad "$ANALYSIS_TEMPLATE is missing"
+fi
+if grep -c 'successCondition:' "$ANALYSIS_TEMPLATE" 2>/dev/null | grep -q '^2$' \
+  && grep -c 'failureCondition:' "$ANALYSIS_TEMPLATE" 2>/dev/null | grep -q '^2$'; then
+  ok "$ANALYSIS_TEMPLATE's two metrics (success-rate, latency-p95) both define successCondition and failureCondition"
+else
+  bad "$ANALYSIS_TEMPLATE is missing a successCondition/failureCondition pair on one of its two metrics"
+fi
+if grep -q 'name: success-rate' "$ANALYSIS_TEMPLATE" 2>/dev/null && grep -q 'name: latency-p95' "$ANALYSIS_TEMPLATE" 2>/dev/null; then
+  ok "$ANALYSIS_TEMPLATE defines the success-rate and latency-p95 metrics"
+else
+  bad "$ANALYSIS_TEMPLATE is missing the success-rate or latency-p95 metric"
+fi
+
+# 149. per-environment latency-p95 thresholds are baked in at Helm-render time, not left to Argo
+# Rollouts' own {{args.X}} runtime templating (would collide with Helm's own {{ }} syntax) --
+# values-dev.yaml gets the real Ollama-CPU number (5s), values-staging/-prod get the mock number
+# (0.3s); values.yaml's own base default is deliberately empty so a missing per-env override
+# fails fast via the `required` guard in analysistemplate.yaml, not a silent wrong threshold.
+if grep -q 'latencyP95ThresholdSeconds: ""' helm/ai-platform/values.yaml 2>/dev/null; then
+  ok "values.yaml's own rollout.analysis.latencyP95ThresholdSeconds default is empty (forces every env to set a real one)"
+else
+  bad "values.yaml's rollout.analysis.latencyP95ThresholdSeconds is missing or not empty"
+fi
+if grep -q 'latencyP95ThresholdSeconds: "5"' helm/ai-platform/values-dev.yaml 2>/dev/null; then
+  ok "values-dev.yaml sets rollout.analysis.latencyP95ThresholdSeconds to 5 (the real Ollama-CPU backend)"
+else
+  bad "values-dev.yaml is missing rollout.analysis.latencyP95ThresholdSeconds: \"5\""
+fi
+missing_mock_threshold=""
+for f in values-staging.yaml values-prod.yaml; do
+  grep -q 'latencyP95ThresholdSeconds: "0.3"' "helm/ai-platform/$f" 2>/dev/null || missing_mock_threshold+=" $f"
+done
+if [[ -z "$missing_mock_threshold" ]]; then
+  ok "values-staging.yaml and values-prod.yaml both set rollout.analysis.latencyP95ThresholdSeconds to 0.3 (the mock backend)"
+else
+  bad "missing rollout.analysis.latencyP95ThresholdSeconds: \"0.3\" in:$missing_mock_threshold"
+fi
+
+# 150. the k6 load script and the two new shell scripts exist and are executable/well-formed
+if [[ -f scripts/load/chat-load.js ]] && grep -q 'export default function' scripts/load/chat-load.js; then
+  ok "scripts/load/chat-load.js exists and defines a default export (k6's entry point)"
+else
+  bad "scripts/load/chat-load.js is missing or does not define a default export"
+fi
+ARGO_SCRIPT="scripts/bootstrap/argo-rollouts.sh"
+if [[ -x "$ARGO_SCRIPT" ]] && grep -q 'cmd_install' "$ARGO_SCRIPT" && grep -q 'cmd_status' "$ARGO_SCRIPT" \
+  && grep -q 'cmd_dashboard' "$ARGO_SCRIPT" && grep -q 'cmd_uninstall' "$ARGO_SCRIPT"; then
+  ok "$ARGO_SCRIPT is executable and implements install/status/dashboard/uninstall"
+else
+  bad "$ARGO_SCRIPT is missing, not executable, or missing one of its subcommands"
+fi
+CANARY_SCRIPT="scripts/verify/canary-demo.sh"
+if [[ -x "$CANARY_SCRIPT" ]] && grep -q '\-\-good' "$CANARY_SCRIPT" && grep -q '\-\-bad' "$CANARY_SCRIPT" \
+  && grep -q 'cmd_good' "$CANARY_SCRIPT" && grep -q 'cmd_bad' "$CANARY_SCRIPT"; then
+  ok "$CANARY_SCRIPT is executable and implements --good/--bad"
+else
+  bad "$CANARY_SCRIPT is missing, not executable, or missing --good/--bad"
+fi
+if grep -q 'ENV.*dev' "$CANARY_SCRIPT" 2>/dev/null && grep -q 'MODE.*==.*bad' "$CANARY_SCRIPT" 2>/dev/null; then
+  ok "$CANARY_SCRIPT refuses --bad against --env dev (dev runs the real Ollama backend, not MockBackend)"
+else
+  bad "$CANARY_SCRIPT is missing its --bad/--env dev refusal"
+fi
+
+# 151. if shellcheck is available, both new scripts pass it (same bar as every earlier phase's
+# scripts)
+if have shellcheck; then
+  if shellcheck -x -P SCRIPTDIR "$ARGO_SCRIPT" "$CANARY_SCRIPT" >/dev/null 2>&1; then
+    ok "shellcheck: $ARGO_SCRIPT and $CANARY_SCRIPT are clean"
+  else
+    bad "shellcheck found issues in $ARGO_SCRIPT or $CANARY_SCRIPT"
+  fi
+else
+  ok "shellcheck not installed in this sandbox -- skipping (not this phase's gap)"
+fi
+
+# 152. versions.env pins Argo Rollouts (controller + kubectl plugin) and k6, each with real
+# sha256 checksums computed from actual downloaded assets, not copied from a page uncritically
+missing_pins=""
+for var in ARGO_ROLLOUTS_VERSION ARGO_ROLLOUTS_INSTALL_SHA256 ARGO_ROLLOUTS_KUBECTL_PLUGIN_SHA256_AMD64 \
+  ARGO_ROLLOUTS_KUBECTL_PLUGIN_SHA256_ARM64 K6_VERSION K6_SHA256_AMD64 K6_SHA256_ARM64; do
+  grep -q "^${var}=" versions.env || missing_pins+=" $var"
+done
+if [[ -z "$missing_pins" ]]; then
+  ok "versions.env pins ARGO_ROLLOUTS_VERSION/K6_VERSION and their checksums"
+else
+  bad "versions.env is missing:$missing_pins"
+fi
+
+# 153. scripts/lib/common.sh's tool_version() knows about k6 and kubectl-argo-rollouts
+if grep -q 'k6' scripts/lib/common.sh 2>/dev/null && grep -q 'kubectl-argo-rollouts' scripts/lib/common.sh 2>/dev/null; then
+  ok "scripts/lib/common.sh's tool_version() has cases for k6 and kubectl-argo-rollouts"
+else
+  bad "scripts/lib/common.sh's tool_version() is missing a case for k6 or kubectl-argo-rollouts"
+fi
+
+# 154. Makefile: the new Phase 18 targets exist
+for target in rollout-install rollout-status rollout-dashboard rollout-uninstall canary-demo-good canary-demo-bad; do
+  if grep -qE "^${target}:" Makefile; then
+    ok "Makefile target: $target"
+  else
+    bad "Makefile is missing target: $target"
+  fi
+done
+
+# 155. README.md / ADR / docs/progressive-delivery.md / docs/component-qa.md all gained Phase 18
+# material
+if grep -q 'ADR-39' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-39"
+else
+  bad "docs/adr/README.md is missing ADR-39 (progressive delivery)"
+fi
+if [[ -f docs/progressive-delivery.md ]]; then
+  ok "docs/progressive-delivery.md exists"
+else
+  bad "docs/progressive-delivery.md is missing"
+fi
+if grep -qi 'phase 18' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 18 section"
+else
+  bad "docs/component-qa.md is missing a Phase 18 section"
+fi
+if grep -E '^\| 18 ' README.md | grep -qvi 'planned'; then
+  ok "README.md's Phase 18 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 18 status row still says Planned (or the row is missing/reworded)"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"

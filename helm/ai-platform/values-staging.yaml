@@ -11,10 +11,35 @@ namespace: polaris-staging
 ingress:
   host: ai-staging.localhost
 
+# Phase 18 (ADR-39): staging stays on the mock backend (values.yaml's shared default, untouched
+# here), so docs/architecture.md section 9's SLI table's mock latency target applies.
+rollout:
+  analysis:
+    latencyP95ThresholdSeconds: "0.3"
+
 # Phase 9. POLARIS_ENVIRONMENT is safe to set unconditionally (just an attribute on the app's own
-# logs/spans). serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED stay at values.yaml's false
-# default here on purpose -- this delivery only proves the observability stack in polaris-dev
-# (see values-dev.yaml's comment). Installing deploy/platform/observability/ into this namespace
-# too and flipping the same two switches here is the natural next step, not done in Phase 9.
+# logs/spans). config.POLARIS_OTEL_ENABLED stays at values.yaml's false default here on purpose
+# -- this delivery only proves full traces/logs in polaris-dev (see values-dev.yaml's comment);
+# that scoping is untouched.
+#
+# serviceMonitor.enabled is turned on below, though, overriding Phase 9's original "only dev"
+# scoping for this one switch -- a real, proven need found on the target machine, not scope
+# creep: Phase 18's AnalysisTemplate (ADR-39) queries the real Prometheus in the observability
+# namespace for ai_requests_total/ai_chat_duration_seconds, and with this chart's default
+# (serviceMonitor.enabled: false here), Prometheus never discovers ai-service in polaris-staging
+# at all -- both of the AnalysisTemplate's metrics query an empty series regardless of how much
+# real k6 traffic is sent, and the canary sits Paused/Inconclusive forever (confirmed for real,
+# 2026-10-30: stuck at "? 6" Inconclusive measurements for over an hour against polaris-staging).
+# staging (not dev) is where canary-demo.sh --good/--bad actually run, since only MockBackend
+# (staging/prod) has the mock_failure_rate knob the --bad demo needs (dev runs the real Ollama
+# backend) -- so staging needs this switch on even though dev already has it. Prometheus's own
+# serviceMonitorNamespaceSelector is already {} (deploy/platform/observability/
+# kube-prometheus-stack-values.yaml) -- it watches every namespace, so this needs no change on
+# the Prometheus side, same cross-namespace discovery dev's own ServiceMonitor already proved in
+# Phase 9. POLARIS_OTEL_ENABLED is deliberately left untouched -- this is about the AnalysisTemplate's
+# Prometheus metrics only, not a reversal of Phase 9's OTel traces/logs scoping.
+serviceMonitor:
+  enabled: true
+
 config:
   POLARIS_ENVIRONMENT: "staging"

@@ -235,6 +235,11 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             request.app.state.finops_metrics.requests_total.labels(
                 tenant_id=body.tenant_id, model="unknown", outcome="backend_timeout"
             ).inc()
+            # Phase 18 (ADR-39): a canary slow enough to time out is exactly as bad, for rollout
+            # gating, as one slow to succeed -- observed here too, not just on the success path.
+            request.app.state.rollout_metrics.chat_duration_seconds.labels(
+                outcome="backend_timeout"
+            ).observe(time.perf_counter() - started)
             raise ApiError(
                 504, "backend_timeout", "The model backend did not answer in time."
             ) from exc
@@ -253,6 +258,9 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
             request.app.state.finops_metrics.requests_total.labels(
                 tenant_id=body.tenant_id, model="unknown", outcome="backend_error"
             ).inc()
+            request.app.state.rollout_metrics.chat_duration_seconds.labels(
+                outcome="backend_error"
+            ).observe(time.perf_counter() - started)
             raise ApiError(502, "backend_error", "The model backend failed.") from exc
 
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
@@ -307,6 +315,11 @@ def create_app(settings: Settings | None = None, backend: ModelBackend | None = 
                 tenant_id=body.tenant_id, model=result.model, kind="completion"
             ).inc(result.completion_tokens)
         finops.inference_seconds_total.labels(tenant_id=body.tenant_id, model=result.model).inc(
+            latency_ms / 1000.0
+        )
+        # Phase 18 (ADR-39): the rollout-gating histogram, success path. Not tenant/model-
+        # labeled -- see telemetry.py's module docstring for why.
+        request.app.state.rollout_metrics.chat_duration_seconds.labels(outcome="success").observe(
             latency_ms / 1000.0
         )
 

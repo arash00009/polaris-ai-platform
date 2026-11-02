@@ -45,12 +45,14 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	cosign-verify \
 	kyverno-install kyverno-status kyverno-apply-policy kyverno-verify-demo kyverno-uninstall \
 	eval-install eval-lint eval-test eval-check eval-run \
-	pushgateway-install pushgateway-status pushgateway-dashboard-configmap pushgateway-uninstall
+	pushgateway-install pushgateway-status pushgateway-dashboard-configmap pushgateway-uninstall \
+	rollout-install rollout-status rollout-dashboard rollout-uninstall \
+	canary-demo-good canary-demo-bad
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
 
-tools-install: ## Install pinned k3d, kubectl, helm, gitleaks, actionlint and kubeseal into ~/.local/bin (no sudo). Add ARGS="--only gitleaks" etc. to install just one
+tools-install: ## Install pinned k3d, kubectl, helm, gitleaks, actionlint, kubeseal, cosign, kubectl-argo-rollouts and k6 into ~/.local/bin (no sudo). Add ARGS="--only gitleaks" etc. to install just one
 	./scripts/bootstrap/install-tools.sh $(ARGS)
 
 doctor: ## Check that this machine can run the platform
@@ -457,3 +459,33 @@ pushgateway-dashboard-configmap: ## Regenerate deploy/platform/eval/dashboards/e
 
 pushgateway-uninstall: ## Remove the Pushgateway and its dashboard ConfigMap
 	./scripts/bootstrap/pushgateway.sh uninstall
+
+rollout-install: ## Install the Argo Rollouts controller into its own argo-rollouts namespace (needs: make cluster-up)
+	./scripts/bootstrap/argo-rollouts.sh install
+
+rollout-status: ## Show the Argo Rollouts controller's pods and the ai-service Rollout's sync/health
+	./scripts/bootstrap/argo-rollouts.sh status
+
+rollout-dashboard: ## Port-forward-free Argo Rollouts dashboard on http://localhost:3100 (Ctrl-C to stop)
+	./scripts/bootstrap/argo-rollouts.sh dashboard
+
+rollout-uninstall: ## Remove the Argo Rollouts controller (Rollout resources it was managing are left untouched)
+	./scripts/bootstrap/argo-rollouts.sh uninstall
+
+canary-demo-good: ## Run a real canary with a healthy "version B" (a real config bump via helm upgrade --reuse-values): generates k6 load, watches it promote. Add ARGS="--env prod" etc.
+	./scripts/verify/canary-demo.sh --good $(ARGS)
+
+canary-demo-bad: ## Run a real canary with a deliberately bad "version B" (MockBackend failure_rate raised past the SLI threshold): watches Argo Rollouts auto-rollback it. Add ARGS="--env prod" etc.
+	./scripts/verify/canary-demo.sh --bad $(ARGS)
+
+# canary-demo-promote/-retry/-abort: found necessary for real on the target machine, 2026-10-30 --
+# Inconclusive doesn't auto-resolve (ADR-39); these give a way out without kubectl-argo-rollouts
+# syntax guesswork.
+canary-demo-promote: ## Unstick a Paused/Inconclusive canary by promoting it straight to 100% weight, skipping any remaining analysis
+	./scripts/verify/canary-demo.sh --promote $(ARGS)
+
+canary-demo-retry: ## Unstick a Paused/Inconclusive (or Failed) canary by asking Argo Rollouts to re-run the analysis step
+	./scripts/verify/canary-demo.sh --retry $(ARGS)
+
+canary-demo-abort: ## Unstick a Paused/Inconclusive canary by aborting it and rolling back to the stable ReplicaSet (confirmed for real on the target machine, 2026-10-30)
+	./scripts/verify/canary-demo.sh --abort $(ARGS)

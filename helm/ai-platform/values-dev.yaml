@@ -10,6 +10,13 @@ namespace: polaris-dev
 ingress:
   host: ai.localhost
 
+# Phase 18 (ADR-39): dev runs the real Ollama backend (POLARIS_BACKEND=openai_compat below), so
+# docs/architecture.md section 9's SLI table's Ollama-CPU latency target applies here, not the
+# mock one -- "calibrated in Phase 9/11" per that same table.
+rollout:
+  analysis:
+    latencyP95ThresholdSeconds: "5"
+
 # Phase 15 / ADR-34: dev is the one environment proven end to end with egress default-deny --
 # same "prove it in one environment first" pattern as the OTel/backend block below. staging/prod
 # are untouched (networkPolicy.egress.enabled stays false there, values.yaml's default), so

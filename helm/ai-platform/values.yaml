@@ -84,6 +84,16 @@ lifecycle:
   preStopSleepSeconds: 5
 terminationGracePeriodSeconds: 15
 
+# Phase 18 (ADR-39). successRateThreshold is shared -- docs/architecture.md section 9's
+# availability SLI (>= 99%) does not vary by backend. latencyP95ThresholdSeconds has no default
+# on purpose, same reasoning as environment/namespace above: the SLI table gives two different
+# numbers for mock (<= 0.3s) vs Ollama CPU (<= 5s), and picking one here that fit neither
+# honestly would make the canary gate meaningless. Every values-<env>.yaml must set it.
+rollout:
+  analysis:
+    successRateThreshold: "0.99"
+    latencyP95ThresholdSeconds: ""
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
@@ -102,11 +112,14 @@ networkPolicy:
   # everything else is named per-component below rather than one shared "allow everything out"
   # rule, so a future new egress need is a reviewable one-line addition, not a silent opt-out.
   # enabled: false here -- same "prove it in one environment first" pattern as gateway.enabled/
-  # serviceMonitor.enabled/POLARIS_OTEL_ENABLED (only values-dev.yaml turns this on) -- not
-  # because any real risk was found for staging/prod (both run the mock backend with OTel off
-  # today, so neither actually needs any egress beyond DNS yet), but because "no real workload
-  # needs it today" is not the same claim as "confirmed not to break anything," and every
-  # similar toggle in this chart has earned that claim on the target machine before going wider.
+  # POLARIS_OTEL_ENABLED (only values-dev.yaml turns those two on) -- not because any real risk
+  # was found for staging/prod (both run the mock backend with OTel off today, so neither
+  # actually needs any egress beyond DNS yet), but because "no real workload needs it today" is
+  # not the same claim as "confirmed not to break anything," and every similar toggle in this
+  # chart has earned that claim on the target machine before going wider. serviceMonitor.enabled
+  # is the one exception since Phase 18 (ADR-39, values-staging.yaml's own comment) -- it needs
+  # no egress change either way, since Prometheus scraping ai-service is the inbound
+  # allowScrapeFromNamespace rule above, not an egress rule.
   egress:
     enabled: false
     dnsNamespace: kube-system

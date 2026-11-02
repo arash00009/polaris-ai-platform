@@ -1,0 +1,57 @@
+# helm/ai-platform/templates/analysistemplate.yaml — Phase 18 (ADR-39). Referenced by name from
+# rollout.yaml's canary step; queries the real, already-running Prometheus
+# (kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090 — the exact in-cluster
+# service name confirmed for real during Phase 17's target-machine verification, not guessed).
+#
+# Two metrics, matching docs/architecture.md section 9's SLI table (availability >= 99%, p95
+# latency <= 300ms mock / <= 5s Ollama CPU):
+#
+#   - success-rate: ai_requests_total{outcome="success"} as a share of all ai_requests_total —
+#     the real FinOps counter from Phase 13, not a generic HTTP status-code metric (ai_service
+#     never actually produces one — see telemetry.py's module docstring, Phase 18 addendum).
+#   - latency-p95: histogram_quantile(0.95, ...) over the new ai_chat_duration_seconds histogram
+#     this phase added (there was no latency histogram before Phase 18 — a real gap, not a
+#     stylistic choice, see ADR-39's Context).
+#
+# Both metrics define successCondition AND failureCondition explicitly, not a successCondition
+# alone: checked against Argo Rollouts' own documented behaviour, an empty Prometheus result (no
+# traffic yet) makes a lone successCondition evaluate false and score the measurement Failed --
+# exactly the wrong outcome for a canary nobody has sent traffic to yet. With both conditions
+# defined, an empty result matches neither and is scored Inconclusive instead (bounded by
+# inconclusiveLimit). scripts/load/chat-load.js (k6) exists so this case stays rare in practice,
+# not as the only safeguard against it.
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: ai-service-canary-analysis
+  namespace: {{ include "ai-platform.namespace" . }}
+  labels:
+    {{- include "ai-platform.labels" . | nindent 4 }}
+spec:
+  metrics:
+    - name: success-rate
+      interval: 1m
+      count: 3
+      inconclusiveLimit: 2
+      failureLimit: 1
+      successCondition: "len(result) > 0 && result[0] >= {{ .Values.rollout.analysis.successRateThreshold }}"
+      failureCondition: "len(result) > 0 && result[0] < {{ .Values.rollout.analysis.successRateThreshold }}"
+      provider:
+        prometheus:
+          address: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090"
+          query: |
+            sum(increase(ai_requests_total{outcome="success"}[5m]))
+            /
+            sum(increase(ai_requests_total[5m]))
+    - name: latency-p95
+      interval: 1m
+      count: 3
+      inconclusiveLimit: 2
+      failureLimit: 1
+      successCondition: "len(result) > 0 && result[0] <= {{ required "values-<env>.yaml must set rollout.analysis.latencyP95ThresholdSeconds (docs/architecture.md section 9's SLI table: 0.3 mock / 5 Ollama CPU)" .Values.rollout.analysis.latencyP95ThresholdSeconds }}"
+      failureCondition: "len(result) > 0 && result[0] > {{ .Values.rollout.analysis.latencyP95ThresholdSeconds }}"
+      provider:
+        prometheus:
+          address: "http://kube-prometheus-stack-prometheus.observability.svc.cluster.local:9090"
+          query: |
+            histogram_quantile(0.95, sum(rate(ai_chat_duration_seconds_bucket[5m])) by (le))

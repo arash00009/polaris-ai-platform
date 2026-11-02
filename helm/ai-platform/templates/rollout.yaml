@@ -1,12 +1,29 @@
-# helm/ai-platform/templates/deployment.yaml — Phase 5.
+# helm/ai-platform/templates/rollout.yaml — Phase 5 (as deployment.yaml), converted to an Argo
+# Rollouts Rollout in Phase 18 (ADR-39).
 #
 # securityContext, probes and lifecycle are the same fields as deploy/k8s/ai-service/deployment.yaml
 # (Phase 4) — only their source moved from hardcoded YAML to values.yaml. image.repository/tag
 # replace the __AI_SERVICE_IMAGE__ sed substitution: scripts/deploy/helm.sh computes the same
 # <version>-<git-sha> tag Phase 3/4 already use and passes it with --set, so there is still no
 # "latest" (ADR-19) and a missing tag still fails fast instead of deploying silently.
-apiVersion: apps/v1
-kind: Deployment
+#
+# Phase 18: `apiVersion`/`kind` and `spec.strategy` are the only new pieces here -- every pod-spec
+# field below carries over from the plain Deployment this replaced unchanged. One-time migration
+# note (ADR-39): every polaris-dev/-staging/-prod namespace already has a real Deployment named
+# ai-service from Phase 4/5 onward; `kubectl delete deployment ai-service -n <namespace>
+# --cascade=orphan` before the first `helm upgrade` to this chart version lets the already-running
+# ReplicaSet/Pods be adopted by this Rollout by label selector, instead of Helm's own release
+# diffing deleting the old Deployment outright and causing a brief full-recreate gap. See
+# docs/progressive-delivery.md.
+#
+# Canary steps: setWeight 50, then a blocking analysis step (ai-service-canary-analysis.yaml),
+# then setWeight 100. Not a finer 20/50/80 staircase: replicaCount is 2 (dev/staging) or 3 (prod)
+# everywhere (Phase 5, for reasons unrelated to canary granularity), and without a trafficRouting
+# plugin (Traefik is not one Argo Rollouts natively weights traffic through) a basic canary
+# approximates weight by ReplicaSet pod count -- at 2-3 replicas a 20% step would silently round
+# to 0% or 50% anyway, so 50% is the one step these real replica counts can actually produce.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: ai-service
   namespace: {{ include "ai-platform.namespace" . }}
@@ -17,6 +34,14 @@ spec:
   selector:
     matchLabels:
       {{- include "ai-platform.selectorLabels" . | nindent 6 }}
+  strategy:
+    canary:
+      steps:
+        - setWeight: 50
+        - analysis:
+            templates:
+              - templateName: ai-service-canary-analysis
+        - setWeight: 100
   template:
     metadata:
       annotations:

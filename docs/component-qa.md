@@ -543,3 +543,47 @@ panels rendering it in a browser. Full record: `docs/ai-evaluation.md`, ADR-38,
 | 4. Scale | A Pushgateway holds only the *last* pushed value per grouping key (`backend`), not a history of every run — a real trend over many runs needs a scheduled job (not built this phase, named in ADR-38's "Revisit when"), not more Pushgateway capacity. |
 | 5. Security | A write-endpoint added to `ai_service` instead (the alternative this phase rejected) would have added an authenticated write surface to a serving path whose threat model (Phase 12-15's auth, rate limiting, admission policy) never anticipated one — the Pushgateway keeps that concern entirely outside the service. |
 | 6. Cloud | A real production deployment comparing many prompt variants, needing human review of individual answers, or wanting trace-level debugging of a bad response is exactly the forcing function that would make Langfuse's or Phoenix's own tracing UI worth its RAM cost — named as the reopening condition (ADR-38), not built pre-emptively. |
+
+## Phase 18
+
+Status: **real progress confirmed on the target machine (Darya), 2026-10-30, with two genuine
+gaps found and fixed along the way — the canary itself has not yet promoted or rolled back for
+real.** `app/ai_service`'s own suite grows to 188 tests (99%+ coverage) with the new
+`ai_chat_duration_seconds` histogram's tests. On Darya: the one-time Deployment→Rollout
+migration and a real Argo Rollouts controller install both completed cleanly against
+`polaris-staging`. Running `canary-demo.sh --good` against it then surfaced two real,
+previously-undiscovered gaps, both fixed in the same session: (1) `serviceMonitor.enabled` was
+`false` for `staging`/`prod` (Phase 9/ADR-27's original dev-only scoping), so Prometheus never
+discovered `ai-service` there and the `AnalysisTemplate`'s two metrics always queried an empty
+series — the `AnalysisRun` sat `Paused`/`Inconclusive` for over an hour despite real k6 traffic
+running the whole time; fixed by turning `serviceMonitor.enabled: true` on for
+`values-staging.yaml`/`values-prod.yaml` too, without reopening ADR-27's separate, still-valid
+decision to keep full OTel traces/logs dev-only. (2) `canary-demo.sh`'s own `helm upgrade
+--reuse-values` needed `--force-conflicts` (Argo CD owns these environments' ConfigMap fields
+via server-side apply, and helm v4's SSA mode refuses to overwrite a field it doesn't own) — the
+same flag `scripts/deploy/helm.sh` has carried since Phase 15, just never carried into this
+phase's own script. Not yet confirmed: a real canary actually reaching `Healthy` or `Degraded`
+with both fixes in place, and the migration/controller-install steps against
+`polaris-dev`/`polaris-prod`. Full record: `docs/progressive-delivery.md`, ADR-39.
+
+### Argo Rollouts canary + `AnalysisTemplate` against real Prometheus metrics
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | `docs/architecture.md`'s own Phase 0 roadmap names this phase's "Done when" line exactly: "Version A → B canary with analysis; failed B rolls back automatically." Nothing before this phase could answer "did the last deploy actually behave correctly in production traffic, and if not, did it fix itself?" automatically — Phase 7's post-deploy verification runs once, after the fact; it does not gate a rollout's own promotion in real time. |
+| 2. Why | `ai-service`'s `Deployment` becomes an Argo Rollouts `Rollout` (ADR-02 already chose Argo Rollouts over Flagger) with a two-step canary (`setWeight: 50` → blocking analysis → `setWeight: 100`) and an `AnalysisTemplate` querying the real, already-running Prometheus for two metrics matching `docs/architecture.md` section 9's SLI table exactly: `success-rate` (from the real `ai_requests_total{outcome}` counter, Phase 13) and `latency-p95` (from a new histogram, see the next table). Not a finer 20/50/80 staircase: `replicaCount` is 2 (dev/staging) or 3 (prod) everywhere already, for reasons unrelated to canary granularity, and without a traffic-routing plugin a basic canary approximates weight by pod count — a 20% step would silently round to 0% or 50% anyway. |
+| 3. Failure | Both metrics define an explicit `successCondition` *and* `failureCondition`, not a `successCondition` alone — checked against Argo Rollouts' own documented behaviour: with only a success condition, an empty Prometheus result (no traffic yet) evaluates false and scores `Failed`, exactly wrong for a canary nobody has sent traffic to yet. With both conditions, an empty result matches neither and scores `Inconclusive` instead, bounded by `inconclusiveLimit`. A genuinely bad canary (real error rate or latency past threshold) makes the Rollout abort on its own — `status.abort: true`, `status.phase: Degraded` — and traffic returns to the previous stable ReplicaSet automatically, no human action. |
+| 4. Scale | A second component wanting the same protection (the gateway, say) is one more `Rollout`/`AnalysisTemplate` pair, not a redesign — deliberately not done this phase (see Decision in ADR-39) since only `ai-service` has a proven need today. |
+| 5. Security | No new secret or credential surface. The Argo Rollouts controller needs cluster-wide RBAC to manage `Rollout`/`AnalysisRun` CRDs across namespaces, the same shape every controller this project has already installed (Argo CD, Kyverno) needs. |
+| 6. Cloud | Metric-gated canary analysis with automatic rollback is exactly how progressive delivery works in a real production Kubernetes platform — this project proves the mechanism with two real, already-emitted metrics rather than inventing synthetic ones, which is the part that actually transfers. |
+
+### A new latency histogram, k6 traffic generation, and reusing `MockBackend`'s existing fault-injection knobs
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Designing the `AnalysisTemplate` found a real gap, not a hypothetical one: `ai_service`'s own `Instrumentator(...).instrument(app)` call is never chained to `.add(...)`, so prometheus-fastapi-instrumentator's generic HTTP latency metric is never actually produced, and the one latency-shaped signal that does exist (`ai_inference_seconds_total`) is a running-total `Counter` that cannot produce a percentile. Separately, proving "failed B rolls back automatically" needs a real bad canary — and building new fault-injection machinery just to produce one would be building ahead of Phase 19, whose whole job that is. |
+| 2. Why | `ai_chat_duration_seconds`, a `Histogram` labeled only by `outcome` (not `tenant_id`/`model` — a histogram's bucket count already multiplies cardinality far more than a counter's), observed on every outcome including both failure paths, not just the success path `latency_ms` was previously computed on alone. For the "bad canary" demo, `scripts/verify/canary-demo.sh --bad` reuses `MockBackend`'s existing `mock_failure_rate` config knob (already present since Phase 2, named for Phase 19's own fault-injection design) via a plain `helm upgrade --reuse-values --set config.POLARIS_MOCK_FAILURE_RATE=0.5` — nothing about the demo scenario is hardcoded to "this canary is bad," which is the honest way to prove the `AnalysisTemplate` actually works rather than assuming it does. k6 (`scripts/load/chat-load.js`) is the first real use of a tool that has sat in `docs/architecture.md`'s own Phase 1 toolchain list, unused, since this project's first phase. |
+| 3. Failure | `--bad` is refused outright against `--env dev` in `canary-demo.sh`: dev runs the real Ollama backend (`OpenAICompatBackend`), which has no `mock_failure_rate`-style knob, so the flag would silently do nothing there — refused with a clear message instead of a demo that looks like it ran but proves nothing. |
+| 4. Scale | k6's own `--vus`/`--duration` flags scale the synthetic load independently of anything else in this project; the histogram's fixed, small bucket set (12 buckets) does not grow with traffic volume, only with time. |
+| 5. Security | `scripts/load/chat-load.js` sends traffic tagged `tenant_id="canary-demo"` — distinct from the real gateway tenants (Phase 14) and the eval harness's own `"eval"` tenant (Phase 17), so synthetic canary traffic is never confused with either in `ai_service`'s own tenant-labelled metrics/logs. |
+| 6. Cloud | Generating synthetic load during a canary window to keep an `AnalysisTemplate`'s metrics meaningful (rather than relying on organic production traffic alone, which may be too sparse during a canary's first minutes) is standard real-world progressive-delivery practice, not a local-only workaround. |

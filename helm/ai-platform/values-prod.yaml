@@ -20,7 +20,23 @@ podDisruptionBudget:
 ingress:
   host: ai-prod.localhost
 
+# Phase 18 (ADR-39): prod stays on the mock backend (values.yaml's shared default, untouched
+# here), so docs/architecture.md section 9's SLI table's mock latency target applies.
+rollout:
+  analysis:
+    latencyP95ThresholdSeconds: "0.3"
+
 # Phase 9. Same reasoning as values-staging.yaml: POLARIS_ENVIRONMENT is unconditionally safe,
-# the observability stack itself is only proved in polaris-dev in this delivery.
+# full OTel traces/logs (config.POLARIS_OTEL_ENABLED) are only proved in polaris-dev in this
+# delivery, and that scoping is untouched.
+#
+# serviceMonitor.enabled is turned on below for the same real reason as values-staging.yaml's
+# own comment: without it, Prometheus never discovers ai-service here, so Phase 18's
+# AnalysisTemplate (ADR-39) always queries an empty series and the canary never leaves
+# Paused/Inconclusive -- confirmed for real against polaris-staging, 2026-10-30, and the same
+# gap applies identically here since prod also runs MockBackend.
+serviceMonitor:
+  enabled: true
+
 config:
   POLARIS_ENVIRONMENT: "prod"

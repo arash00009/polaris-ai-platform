@@ -73,6 +73,13 @@ tool_version() {
       k3d)     k3d version 2>/dev/null | head -n1 ;;
       kubectl) kubectl version --client 2>/dev/null | head -n1 ;;
       helm)    helm version --short 2>/dev/null || helm version 2>/dev/null ;;
+      # Phase 18: "k6 v2.3.0 (commit/..., go1.26.8, linux/amd64)" -- a "v" prefix already,
+      # confirmed against the real binary in this sandbox, so it needs no special-casing above.
+      k6)      k6 version 2>/dev/null | head -n1 ;;
+      # Phase 18: "kubectl-argo-rollouts: v1.10.1+356117c" -- confirmed against the real binary
+      # in this sandbox; the trailing "+<commit>" after the version is simply not matched by the
+      # same grep every tool in this function already shares.
+      kubectl-argo-rollouts) kubectl-argo-rollouts version 2>/dev/null | head -n1 ;;
       *)       return 0 ;;
     esac
   } | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true

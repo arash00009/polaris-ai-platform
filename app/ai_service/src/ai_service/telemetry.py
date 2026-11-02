@@ -159,6 +159,23 @@ why a shared global registry silently only serves the first app instance created
 which every test in this suite would otherwise hit. The three Counter objects are stashed on
 ``app.state`` (next to the OTel providers) so ``main.py``'s request handler can reach them
 without this module importing anything from main.py.
+
+Phase 18 (ADR-39) adds one more series: ``ai_chat_duration_seconds``, a ``Histogram`` labeled
+only by ``outcome`` (the same bounded three values as ``ai_requests_total``). This fills a real
+gap found while designing Phase 18's Argo Rollouts ``AnalysisTemplate``: despite this module's
+own ``Instrumentator(...).instrument(app)`` call above, no ``.add(...)`` was ever chained onto
+it, so ``self.instrumentations`` stays empty and prometheus-fastapi-instrumentator's generic
+``http_requests_total``/``http_request_duration_seconds`` metrics mentioned a few paragraphs up
+are never actually produced -- checked directly against the installed library's source, not
+assumed from its docs. ``ai_inference_seconds_total`` above is a running-total ``Counter``,
+incremented only on success; there is no way to compute a percentile from a running total, and
+``docs/architecture.md`` section 9's SLI table explicitly wants p95 latency "used both for
+dashboards and for rollout gating." ``ai_chat_duration_seconds`` is observed on *every* outcome
+-- success, ``backend_timeout``, ``backend_error`` -- not just the success path ``latency_ms``
+was previously computed on alone: a canary slow to fail is exactly as bad as one slow to succeed.
+Not labeled by ``tenant_id``/``model``: a histogram's bucket count already multiplies cardinality
+far more than a Counter's, and canary analysis needs one overall latency distribution for the
+Rollout, not a per-tenant breakdown.
 """
 
 import logging
@@ -174,7 +191,7 @@ from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
-from prometheus_client import CollectorRegistry, Counter, Gauge
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from ai_service import __version__
@@ -213,6 +230,20 @@ class FinOpsMetrics(NamedTuple):
     requests_total: Counter
     tokens_total: Counter
     inference_seconds_total: Counter
+
+
+# Phase 18 (ADR-39): where the rollout-gating Histogram created in setup_telemetry is stashed,
+# mirroring _FINOPS_METRICS_ATTR exactly -- unconditional, like /metrics and the FinOps counters
+# above, not gated on otel_enabled.
+_ROLLOUT_METRICS_ATTR = "rollout_metrics"
+
+
+class RolloutMetrics(NamedTuple):
+    """The Phase 18 canary-analysis histogram. See this module's docstring for why it exists and
+    why it is labeled only by outcome.
+    """
+
+    chat_duration_seconds: Histogram
 
 
 # Phase 10: docs/architecture.md section 6's trace/log attribute allow-list, the names as they
@@ -374,6 +405,26 @@ def setup_telemetry(app: FastAPI, settings: Settings, governance: GovernanceInfo
                 "ai_inference_seconds",
                 "Wall-clock seconds spent waiting on the model backend, by tenant and model.",
                 ["tenant_id", "model"],
+                registry=registry,
+            ),
+        ),
+    )
+
+    # Phase 18 (ADR-39): the rollout-gating latency histogram, registered on that SAME registry,
+    # for the same one-per-app-instance reason as the FinOps counters just above. Buckets chosen
+    # to give meaningful resolution right around both of docs/architecture.md section 9's SLI
+    # thresholds (0.3s mock, 5s Ollama CPU), with 60s as a last real bucket below +Inf since
+    # values-dev.yaml's own POLARIS_BACKEND_TIMEOUT_S=90 is the real ceiling a request could ever
+    # take before failing outright.
+    setattr(
+        app.state,
+        _ROLLOUT_METRICS_ATTR,
+        RolloutMetrics(
+            chat_duration_seconds=Histogram(
+                "ai_chat_duration_seconds",
+                "Wall-clock seconds for a POST /v1/chat call, by outcome (Phase 18, ADR-39).",
+                ["outcome"],
+                buckets=(0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 30, 60),
                 registry=registry,
             ),
         ),

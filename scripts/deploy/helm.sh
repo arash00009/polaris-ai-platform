@@ -194,6 +194,7 @@ need_pushed_gateway() {
 
 hctl() { helm --kube-context "$CONTEXT" "$@"; }
 kctl() { kubectl --context "$CONTEXT" "$@"; }
+rollouts_plugin() { kubectl-argo-rollouts --context "$CONTEXT" "$@"; }
 
 # ---- subcommands -----------------------------------------------------------------------------
 
@@ -337,8 +338,44 @@ cmd_apply() {
     "${gateway_args[@]}" \
     "${ephemeral_args[@]}" \
     --namespace "$ns" --create-namespace \
-    --force-conflicts \
-    --wait --timeout 120s
+    --force-conflicts
+
+  # --wait was dropped here, not just given a longer --timeout: found for real on the target
+  # machine, 2026-10-30, running the one-time Deployment->Rollout migration (ADR-39) against
+  # polaris-dev. Raising --timeout from 120s to 600s first (tried and kept failing) did not help
+  # -- `time make helm-apply-dev` showed it waiting the full 600s every time, even though
+  # `kubectl-argo-rollouts get rollout ai-service` showed the Rollout genuinely healthy
+  # throughout. Root cause, confirmed rather than assumed: Helm's generic `--wait` logic has no
+  # native understanding of the `argoproj.io/v1alpha1 Rollout` kind (unlike Deployment/
+  # StatefulSet, which it does understand) -- it can never read a "ready" status back for one, so
+  # no timeout value, however large, would ever let it succeed. `canary-demo.sh`'s own `helm
+  # upgrade` calls already knew this and never passed `--wait` for exactly this reason (see
+  # docs/progressive-delivery.md); this script just hadn't caught up yet. Fix: drop `--wait`
+  # entirely from this upgrade and verify readiness afterward with each resource's OWN
+  # status-aware tooling instead -- kubectl-argo-rollouts for the Rollout, plain `kubectl rollout
+  # status` for the gateway's still-plain Deployment -- rather than one generic flag that cannot
+  # speak either resource's real health correctly.
+  #
+  # Scoped to the real, persistent target-machine cluster only -- the one this whole fix was
+  # found and confirmed against. CI's ephemeral k3d cluster (.github/workflows/ci.yml) never
+  # installs the Argo Rollouts controller/CRD and its own `make tools-install` call never
+  # installs the kubectl-argo-rollouts plugin either (only k3d/kubectl/helm) -- whether a Rollout
+  # even reconciles there at all is a separate, unverified question (ADR-39/ADR-40 didn't touch
+  # CI), named here rather than silently assumed one way or the other. Skipping this under
+  # --ephemeral keeps this fix scoped to the real problem it solves, instead of guessing at a
+  # second one.
+  if [[ "$ephemeral" != "true" ]]; then
+    have kubectl-argo-rollouts \
+      || die "helm upgrade applied, but kubectl-argo-rollouts not found to verify the Rollout actually became healthy. Run 'make tools-install ARGS=\"--only kubectl-argo-rollouts\"' then: kubectl-argo-rollouts --context $CONTEXT -n $ns get rollout ai-service"
+    log_info "verifying the ai-service Rollout actually reaches Healthy (helm's own --wait can't read this CRD's status at all, confirmed on the target machine 2026-10-30 -- see the comment above)"
+    rollouts_plugin -n "$ns" status ai-service --timeout 600s \
+      || die "ai-service Rollout did not reach Healthy within 600s. Inspect: kubectl-argo-rollouts --context $CONTEXT -n $ns get rollout ai-service"
+  fi
+
+  if [[ "$(gateway_enabled_for "$env")" == "true" ]]; then
+    kctl -n "$ns" rollout status deployment/ai-gateway --timeout=120s \
+      || die "ai-gateway Deployment did not become ready within 120s. Inspect: kubectl --context $CONTEXT -n $ns describe deployment ai-gateway"
+  fi
 
   log_ok "$rel is rolled out (image $CLUSTER_REPO:$TAG)"
 
