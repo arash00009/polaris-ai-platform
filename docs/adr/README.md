@@ -1575,6 +1575,164 @@ than a hypothetical one. Also revisit once the target-machine confirmation happe
 "real cluster is the only real proof" discipline every earlier Kubernetes-facing phase in this
 project has followed.
 
+### ADR-40: Failure engineering — three distinct detection/recovery paths (a dev canary lever,
+Alertmanager + git-revert for a gateway regression, Alertmanager + `bump-image-tag.sh` for a
+stuck canary), not one chaos tool run three times
+
+Status: accepted. Written and shellchecked in the sandbox (no cluster, no `helm`, no git remote
+access). Scenario 1 is now confirmed for real on the target machine (Darya, 2026-11-01/02) — see
+Consequences below and `docs/failure-engineering.md` section 6 for what that run actually found,
+which turned out to be broader than this scenario's own fault lever. Scenario 2
+(`tenant-regression.sh`), Scenario 3 (`break-image-tag.sh`), and turning on Alertmanager/applying
+`alerting-rules.yaml` have not yet been delivered to or run on Darya at all — still only written
+and shellchecked in the sandbox. See `docs/failure-engineering.md`'s own "Target-machine
+verification" section for the current, honest split.
+
+Context: `docs/architecture.md`'s roadmap (section 18) names Phase 19's "Done when" line exactly
+— "Each injected failure is detected by observability and handled by CI/CD + GitOps, with
+evidence" — and section A3 asks the MVP tier for three scenarios specifically. The build-vs-buy
+table (section with "Failure demo") already named the mechanism before this phase started:
+"Scripted fault injection (`scripts/demo/`)", not a chaos-engineering tool. Reading Phase 18
+(ADR-39) closely enough to design this phase surfaced three real, distinct gaps in what it
+already built, not one gap repeatable three ways — see `docs/failure-engineering.md` section 1
+for the full reasoning. In short: `dev` had no fault-injection lever at all (ADR-39's Decision
+named this and deferred it here); `ai-gateway` is a plain `Deployment`, so nothing gates a
+gateway config regression before it reaches 100% of traffic; and a canary `ReplicaSet` whose
+pods never become `Ready` carries zero traffic, so the `AnalysisTemplate`'s own metrics never
+see anything wrong — it just sits "Progressing" indefinitely.
+
+A separate, real finding surfaced while designing the detection side: Alertmanager had been
+`enabled: false` since Phase 9 (`deploy/platform/observability/kube-prometheus-stack-values.yaml`'s
+own comment: "nothing in this project defines alert rules yet, so running it would just be an
+idle process") — an earlier message in this project's own working history assumed it was
+already on and had to be corrected before any code was written, a small but real instance of
+this project's "verify, don't guess" discipline catching a wrong assumption before it shipped.
+
+Decision:
+
+- **Scenario 1 (`canary-demo.sh --bad --env dev`): reuses Phase 18's existing Rollout/
+  `AnalysisTemplate` mechanism unchanged, adding only the missing dev-specific fault lever.**
+  Instead of refusing `--env dev` (ADR-39's Decision), it now points
+  `config.POLARIS_OPENAI_BASE_URL` at an unreachable port (`19999`) on the real Ollama Service
+  DNS name. `OpenAICompatBackend.generate()` already catches `httpx.RequestError` and raises
+  `BackendError` — the same `outcome=backend_error` series `success-rate` already queries. Zero
+  new application code; the point of this scenario is proving the lever, not a new mechanism.
+- **Scenario 2 (`scripts/demo/tenant-regression.sh`): a real `git revert` through CI/CD +
+  GitOps, deliberately not a direct `helm upgrade --set` shortcut.** `ai-gateway` stays a plain
+  `Deployment` (ADR-39 did not revisit that this phase either — converting a second component
+  before the gateway's own canary becomes a proven need would be the same ahead-of-need building
+  this project has repeatedly declined, ADR-37/ADR-38). The script regresses `acme`'s
+  `rate_limit_burst` (`40` → `1`, keeping `rate_limit_per_minute` unchanged — a realistic
+  "degrades under sustained load" shape, not an obvious every-request failure) in
+  `helm/ai-platform/values-dev.yaml`'s `config.GATEWAY_TENANT_LIMITS_JSON`, then commits (and,
+  with `--push`, pushes) that change directly to `polaris-ai-platform` — ADR-26 already
+  established Argo CD's dev `Application` auto-syncs this repository's chart and values
+  directly (its multi-source definition's Source 1), so no `polaris-gitops` touch is needed for
+  a config-only change. Recovery is a real `git revert` of that exact commit, pushed the same
+  way. `canary-demo.sh`'s own direct `helm upgrade --set --force-conflicts` shortcut was
+  considered and rejected for this scenario specifically: the entire point is proving the
+  git-revert-through-CI/CD-through-GitOps path, which a direct `helm upgrade` bypasses by
+  design (that bypass is exactly why it needs `--force-conflicts` against `argocd-controller`
+  in the first place).
+- **Scenario 3 (`scripts/demo/break-image-tag.sh`): reuses `scripts/gitops/bump-image-tag.sh`
+  as-is for recovery — no new revert logic written.** The script writes a deliberately
+  nonexistent tag (the real current tag plus a `-phase19-fault-injected-does-not-exist` suffix)
+  into `polaris-gitops`'s `environments/<env>/image.yaml`, the exact file `bump-image-tag.sh`
+  normally writes a real, already-pushed tag into. The resulting canary `ReplicaSet`'s pod(s)
+  can never pull the image, never become `Ready`, and the `AnalysisTemplate` never starts
+  analysing them — `bump-image-tag.sh` already writes back the real, registry-verified tag and
+  refuses to write one that is not actually pushed (its own `need_pushed` guard, ADR-26), which
+  is exactly undoing this fault. Writing a second, parallel revert script was considered and
+  rejected: it would either duplicate `bump-image-tag.sh`'s own tag-resolution logic (a second
+  place for that logic to drift out of sync, the same risk ADR-22's "never alter a previous
+  phase's already-verified script" discipline exists to avoid) or call it internally for no
+  real benefit over telling the person to run it directly.
+- **Two new `PrometheusRule` resources, applied separately from the Helm release itself**
+  (`deploy/platform/observability/alerting-rules.yaml`, the same "plain manifest next to the
+  chart" pattern the Grafana dashboard ConfigMap already uses), not baked into
+  `kube-prometheus-stack-values.yaml`'s own inline rule support: keeping them in their own file
+  means editing a threshold does not require touching the chart's values at all, and
+  `ruleSelector`/`ruleNamespaceSelector` are broadened to `{}` (mirroring `serviceMonitorSelector`'s
+  own Phase 9 broadening) so this needs no release-label bookkeeping either.
+  `GatewayTenantRateLimited` (`sum by (tenant_id) (rate(ai_gateway_requests_total
+  {outcome="rate_limited"}[5m])) > 0.05` for `2m`) catches Scenario 2.
+  `AIServiceCrashLooping` (`kube_pod_container_status_waiting_reason{namespace=~"polaris-.*",
+  container="ai-service", reason=~"ImagePullBackOff|ErrImagePull|CrashLoopBackOff"} == 1` for
+  `2m`) catches Scenario 3 — `kube_pod_container_status_waiting_reason`'s exact name, type
+  (Gauge) and labels were confirmed against kube-state-metrics' own upstream docs before writing
+  this rule, not assumed; `kube_pod_container_status_restarts_total`'s own presence was already
+  confirmed real in Phase 9 (it is what the existing Grafana dashboard's restart panel uses).
+- **Alertmanager turned on for real** (`alertmanager.enabled: true`), with a deliberately
+  no-op `"null"` receiver, named plainly rather than hidden: Alertmanager really evaluates both
+  rules and really tracks each alert's Pending/Firing/Resolved lifecycle (`make
+  obs-alerts-status` queries its real `/api/v2/alerts` API as evidence), but nothing pages an
+  actual human — there is no on-call system in this project to page, and faking a
+  Slack/PagerDuty integration nobody receives would be the same kind of unverifiable claim this
+  project avoids elsewhere (the FinOps rate card's illustrative cost model, the eval-score
+  Pushgateway's single-last-value limitation).
+
+Alternatives: a real chaos-engineering tool (Litmus, Chaos Mesh) — rejected, same reasoning
+`docs/architecture.md`'s own build-vs-buy table already gives: this project's scripted, specific
+fault levers prove the same detection/recovery loop without a new, heavier dependency to pin,
+install and verify. A fourth scenario for resource exhaustion (OOMKill/CPU throttling) — not
+built: three real, distinct gaps were already found without inventing a fourth; named as a
+"Revisit when" below, not silently dropped. A real Alertmanager notification channel (Slack
+webhook, PagerDuty) — rejected this phase for the reason given above; `docs/failure-engineering
+.md` names it as a named gap, not hidden. Running Scenario 2 against `staging`/`prod` too —
+rejected: `gateway.enabled` is only `true` in `values-dev.yaml` (Phase 12), and turning it on
+elsewhere is that phase's scope to revisit, not this one's.
+
+Consequences: `deploy/platform/observability/kube-prometheus-stack-values.yaml` gains
+`alertmanager.enabled: true` (with modest, never-load-tested resource requests/limits — the same
+kind of real-but-unconfirmed sizing Grafana's own comment already flags elsewhere in this file)
+and broadened rule discovery; a new `alerting-rules.yaml` holds the two `PrometheusRule`
+resources. `scripts/bootstrap/observability.sh` gains `alerts-apply`/`alertmanager`/
+`alerts-status` subcommands (the last one a short-lived background port-forward + a real
+`/api/v2/alerts` query, the same shape `canary-demo.sh`'s own `start_load`/`cleanup` trap
+already uses for k6). `scripts/verify/canary-demo.sh`'s `--bad --env dev` refusal is replaced
+with a real dev-specific branch; the Makefile and `tests/bootstrap/test_static.sh` both grow
+accordingly (checks 156–161). Two new files, `scripts/demo/tenant-regression.sh` and
+`scripts/demo/break-image-tag.sh`, are the only genuinely new scripts this phase needed — no new
+application code in `app/ai_service` or `app/gateway` at all, since every fault lever reuses
+configuration or validation that already existed (`Literal["mock", "openai_compat"]`'s own
+startup validation was considered for a third, CrashLoopBackOff-specific lever and rejected in
+favor of the image-tag approach above, which needed no new application-level trigger at all).
+
+A real target-machine finding, 2026-11-01/02 (Scenario 1, run for real on Darya — full account in
+`docs/failure-engineering.md` section 6): the broken canary's own failure mode turned out to be a
+readiness *timeout* that crash-loops the pod (26 restarts over ~46h), not a clean refusal, and
+the `AnalysisRun` sat `Paused`/`Inconclusive` for 36+ hours rather than `Failed` — correct per
+this ADR's own `len(result) > 0` design (an empty Prometheus result matches neither condition),
+confirmed a second time in the same session when a completely unrelated, perfectly healthy
+Argo-CD-triggered canary (no `canary-demo.sh` involved) also went `Inconclusive` for lack of any
+traffic source. Separately, and more consequentially: this project's entire Phase 18 (ADR-39 —
+`rollout.yaml`, `analysistemplate.yaml`, `canary-demo.sh`'s `--promote/--retry/--abort`) had been
+built and verified locally on Darya across several target-machine sessions but never actually
+committed or pushed, so `origin/main` — what the `ai-platform-dev` Argo CD `Application` actually
+syncs — was still at Phase 17's plain `Deployment` the entire time. Argo CD's own `selfHeal`
+quietly kept recreating that old `Deployment` alongside the Rollout, both matching the same
+Service selector and sharing the same ConfigMap, diluting every canary's traffic four ways
+instead of two and explaining a meaningful share of why Scenario 1's `AnalysisRun` never saw
+enough samples to resolve. Fixed for real by committing and pushing Phase 18
+(`cc4d667067661aa420f82ea5ebad5ba77b13940e`); Argo CD pruned the stray `Deployment` on its next
+sync. This is a Phase 18 gap surfaced by Phase 19's own first real run, not a flaw in this ADR's
+Decision — named here because it is exactly the kind of "the two deploy paths silently diverged"
+failure this phase's own three scenarios exist to catch, just an unplanned fourth instance of it.
+
+One real, not-yet-closed loop: `scripts/demo/tenant-regression.sh --revert`'s own guard checks
+that the last commit touching `values-dev.yaml` is literally its own injected commit's subject
+line before reverting, to avoid reverting someone else's unrelated commit by accident — a
+deliberately conservative check that will refuse to run if anything else touches that file
+in between `--inject` and `--revert` on the target machine, same spirit as `bump-image-tag.sh`'s
+own "is it a clean checkout" guard.
+
+Revisit when: a later phase adds a real on-call/notification integration (Alertmanager's
+`"null"` receiver stops being an honest description the moment something actually depends on
+being paged); Scenario 2 is worth extending to `staging`/`prod` once the gateway is proven there
+too; a resource-exhaustion scenario becomes a proven need; or the target-machine run (pending)
+finds a real gap in any of the three scenarios, the same "real cluster is the only real proof"
+discipline every earlier Kubernetes-facing phase in this project has followed.
+
 ## Template for a new record
 
 ```
