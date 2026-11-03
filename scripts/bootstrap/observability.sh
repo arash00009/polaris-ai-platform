@@ -42,6 +42,9 @@ CLUSTER_CONFIG="deploy/k3d/cluster.yaml"
 OBS_DIR="deploy/platform/observability"
 DASHBOARD_JSON="$OBS_DIR/dashboards/ai-service-dashboard.json"
 DASHBOARD_CONFIGMAP="$OBS_DIR/dashboards/ai-service-dashboard-configmap.yaml"
+# Phase 19 (ADR-40): two PrometheusRule resources, applied separately from the Helm release
+# itself -- see alerting-rules.yaml's own header comment for why each rule exists.
+ALERTING_RULES="$OBS_DIR/alerting-rules.yaml"
 
 PROM_REPO_NAME="prometheus-community"
 PROM_REPO_URL="https://prometheus-community.github.io/helm-charts"
@@ -125,6 +128,9 @@ cmd_install() {
 
   log_info "applying the ai-service Grafana dashboard ConfigMap"
   kctl apply -f "$DASHBOARD_CONFIGMAP"
+
+  log_info "applying Phase 19's alerting rules (PrometheusRule CRD comes from kube-prometheus-stack above, so this must run after it)"
+  kctl apply -f "$ALERTING_RULES"
 
   install_release loki "$GRAFANA_COMMUNITY_REPO_NAME/loki" \
     "$OBS_DIR/loki-values.yaml" "${LOKI_CHART_VERSION:-}"
@@ -231,9 +237,69 @@ cmd_uninstall() {
     hctl uninstall "$release" -n "$NAMESPACE" --ignore-not-found
   done
   kctl delete -f "$DASHBOARD_CONFIGMAP" --ignore-not-found
+  kctl delete -f "$ALERTING_RULES" --ignore-not-found
   kctl delete namespace "$NAMESPACE" --ignore-not-found
   log_ok "observability stack removed. polaris-dev/-staging/-prod are untouched (no ownership link from their workloads back into this namespace, same reasoning as argocd.sh's uninstall)."
   log_warn "Remember to set serviceMonitor.enabled and config.POLARIS_OTEL_ENABLED back to false for any environment this was wired up for, or 'helm upgrade'/Argo CD sync will fail with 'no matches for kind ServiceMonitor'."
+}
+
+# Phase 19 (ADR-40): re-applies alerting-rules.yaml on its own, for the case where the stack is
+# already installed and only the rules changed -- avoids a full 'install' (and its --wait on
+# every chart) just to pick up an edited threshold.
+cmd_alerts_apply() {
+  need_kubectl
+  kctl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1 \
+    || die "PrometheusRule CRD not found. Run 'make obs-install' first (it installs kube-prometheus-stack, which owns this CRD)."
+  log_info "applying $ALERTING_RULES"
+  kctl apply -f "$ALERTING_RULES"
+  log_ok "applied. Prometheus picks these up on its next reload (ruleSelector: {} means no extra label/annotation is needed) -- confirm with 'make obs-alerts-status' or Prometheus's own /rules page."
+}
+
+cmd_alertmanager() {
+  need_kubectl
+  log_info "Alertmanager on http://localhost:9093. Ctrl-C to stop."
+  # kube-prometheus-stack's Alertmanager StatefulSet service name under fullnameOverride:
+  # kube-prometheus-stack, by the same naming convention cmd_grafana's svc/kube-prometheus-
+  # stack-grafana already confirms for real -- not yet independently confirmed for alertmanager
+  # specifically; if this service name is wrong, 'kubectl -n observability get svc' on the
+  # target machine is the fix (see docs/failure-engineering.md's target-machine verification).
+  kctl -n "$NAMESPACE" port-forward svc/kube-prometheus-stack-alertmanager 9093:9093
+}
+
+# Phase 19 (ADR-40): the "evidence" step scripts/demo/tenant-regression.sh and scripts/demo/
+# break-image-tag.sh point at -- a short-lived background port-forward (same shape as canary-
+# demo.sh's start_load/cleanup trap) so no second terminal is needed, queries Alertmanager's own
+# /api/v2/alerts, and prints only alerts whose alertname matches Phase 19's own rules (so a
+# pre-existing, unrelated alert elsewhere does not make this look broken). Exits 0 whether or not
+# anything is firing -- the caller decides what that means for its own scenario.
+cmd_alerts_status() {
+  need_kubectl
+  have curl || die "curl not found. Run 'make doctor'."
+  have python3 || die "python3 not found"
+  local pf_pid
+  kctl -n "$NAMESPACE" port-forward svc/kube-prometheus-stack-alertmanager 19093:9093 >/dev/null 2>&1 &
+  pf_pid=$!
+  trap 'kill "$pf_pid" 2>/dev/null || true' RETURN
+  sleep 2
+  local body
+  body="$(curl -fsS --max-time 5 http://localhost:19093/api/v2/alerts 2>/dev/null)" \
+    || die "Could not reach Alertmanager at svc/kube-prometheus-stack-alertmanager:9093. Is it installed and running ('make obs-status')?"
+  ALERTS_JSON="$body" python3 - <<'PYEOF'
+import json
+import os
+
+alerts = json.loads(os.environ["ALERTS_JSON"])
+ours = [a for a in alerts if a.get("labels", {}).get("alertname") in
+        ("GatewayTenantRateLimited", "AIServiceCrashLooping")]
+if not ours:
+    print("No Phase 19 alert (GatewayTenantRateLimited, AIServiceCrashLooping) is currently known to Alertmanager.")
+else:
+    for a in ours:
+        labels = a.get("labels", {})
+        status = a.get("status", {}).get("state", "unknown")
+        print(f"{labels.get('alertname')} [{status}] " +
+              ", ".join(f"{k}={v}" for k, v in labels.items() if k != "alertname"))
+PYEOF
 }
 
 CMD="${1:-}"
@@ -243,9 +309,12 @@ case "$CMD" in
   password)              cmd_password ;;
   grafana)               cmd_grafana ;;
   dashboard-configmap)   cmd_dashboard_configmap ;;
+  alerts-apply)          cmd_alerts_apply ;;
+  alertmanager)          cmd_alertmanager ;;
+  alerts-status)         cmd_alerts_status ;;
   uninstall)             cmd_uninstall ;;
   *)
-    echo "Usage: $0 <install|status|password|grafana|dashboard-configmap|uninstall>" >&2
+    echo "Usage: $0 <install|status|password|grafana|dashboard-configmap|alerts-apply|alertmanager|alerts-status|uninstall>" >&2
     exit 1
     ;;
 esac

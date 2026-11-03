@@ -47,7 +47,10 @@ GITOPS_DIR ?= $(CURDIR)/../polaris-gitops
 	eval-install eval-lint eval-test eval-check eval-run \
 	pushgateway-install pushgateway-status pushgateway-dashboard-configmap pushgateway-uninstall \
 	rollout-install rollout-status rollout-dashboard rollout-uninstall \
-	canary-demo-good canary-demo-bad
+	canary-demo-good canary-demo-bad canary-demo-promote canary-demo-retry canary-demo-abort \
+	obs-alerts-apply obs-alertmanager obs-alerts-status \
+	failure-demo-tenant-inject failure-demo-tenant-revert failure-demo-tenant-status \
+	failure-demo-image-break failure-demo-image-revert
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-16s %s\n", $$1, $$2}'
@@ -475,12 +478,13 @@ rollout-uninstall: ## Remove the Argo Rollouts controller (Rollout resources it 
 canary-demo-good: ## Run a real canary with a healthy "version B" (a real config bump via helm upgrade --reuse-values): generates k6 load, watches it promote. Add ARGS="--env prod" etc.
 	./scripts/verify/canary-demo.sh --good $(ARGS)
 
-canary-demo-bad: ## Run a real canary with a deliberately bad "version B" (MockBackend failure_rate raised past the SLI threshold): watches Argo Rollouts auto-rollback it. Add ARGS="--env prod" etc.
+canary-demo-bad: ## Run a real canary with a deliberately bad "version B" (MockBackend failure_rate raised past the SLI threshold, or a real unreachable Ollama on --env dev): watches Argo Rollouts auto-rollback it. Add ARGS="--env dev" etc.
 	./scripts/verify/canary-demo.sh --bad $(ARGS)
 
 # canary-demo-promote/-retry/-abort: found necessary for real on the target machine, 2026-10-30 --
-# Inconclusive doesn't auto-resolve (ADR-39); these give a way out without kubectl-argo-rollouts
-# syntax guesswork.
+# an AnalysisRun that lands on Inconclusive (not Failed) does NOT auto-resolve; the Rollout just
+# stays Paused until a person runs one of these. See docs/troubleshooting.md's Phase 18/19
+# section and ADR-39's Consequences. Add ARGS="--env prod" etc., same as -good/-bad above.
 canary-demo-promote: ## Unstick a Paused/Inconclusive canary by promoting it straight to 100% weight, skipping any remaining analysis
 	./scripts/verify/canary-demo.sh --promote $(ARGS)
 
@@ -489,3 +493,31 @@ canary-demo-retry: ## Unstick a Paused/Inconclusive (or Failed) canary by asking
 
 canary-demo-abort: ## Unstick a Paused/Inconclusive canary by aborting it and rolling back to the stable ReplicaSet (confirmed for real on the target machine, 2026-10-30)
 	./scripts/verify/canary-demo.sh --abort $(ARGS)
+
+# --- Phase 19: Failure engineering (ADR-40) --------------------------------------------------
+# Scenario 1 (a real dev canary failure) reuses canary-demo-bad above with ARGS="--env dev" --
+# no separate target needed. Scenarios 2/3 below are new.
+
+obs-alerts-apply: ## (Re-)apply Phase 19's PrometheusRule resources without a full obs-install (needs: kube-prometheus-stack already installed)
+	./scripts/bootstrap/observability.sh alerts-apply
+
+obs-alertmanager: ## Port-forward Alertmanager to http://localhost:9093 (Ctrl-C to stop)
+	./scripts/bootstrap/observability.sh alertmanager
+
+obs-alerts-status: ## Print any currently firing/pending Phase 19 alert (GatewayTenantRateLimited, AIServiceCrashLooping)
+	./scripts/bootstrap/observability.sh alerts-status
+
+failure-demo-tenant-inject: ## Scenario 2: regress acme's gateway rate limit in values-dev.yaml and commit it (add ARGS=--push to also push)
+	./scripts/demo/tenant-regression.sh --inject --env dev $(ARGS)
+
+failure-demo-tenant-revert: ## Scenario 2: git-revert the injected regression (add ARGS=--push to also push)
+	./scripts/demo/tenant-regression.sh --revert --env dev $(ARGS)
+
+failure-demo-tenant-status: ## Scenario 2: show acme's current limits and any firing Phase 19 alert
+	./scripts/demo/tenant-regression.sh --status --env dev
+
+failure-demo-image-break: ## Scenario 3: write a nonexistent image tag into polaris-gitops' environments/<env>/image.yaml (set ENV=dev|staging|prod, default staging; ARGS=--push; GITOPS_DIR overridable)
+	./scripts/demo/break-image-tag.sh $(or $(ENV),staging) $(GITOPS_DIR) $(ARGS)
+
+failure-demo-image-revert: ## Scenario 3: recover by writing back the real, already-pushed image tag (reuses scripts/gitops/bump-image-tag.sh; set ENV=dev|staging|prod, default staging; ARGS=--push)
+	./scripts/gitops/bump-image-tag.sh $(or $(ENV),staging) $(GITOPS_DIR) $(ARGS)

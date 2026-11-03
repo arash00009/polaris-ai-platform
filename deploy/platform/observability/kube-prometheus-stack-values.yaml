@@ -15,13 +15,42 @@
 # oversight. Re-enable nodeExporter too (one-line flip below) if a later phase needs node-level
 # panels.
 #
-# Alertmanager is OFF too: nothing in this project defines alert rules yet, so running it would
-# just be an idle process. Revisit if/when an alerting phase is added to the roadmap.
+# Alertmanager: ON since Phase 19 (ADR-40). It was OFF through Phase 18 for the honest reason
+# above -- nothing in this project defined an alert rule yet, so running it would have been an
+# idle process. Phase 19 adds two real PrometheusRule resources (alerting-rules.yaml, applied
+# separately -- see scripts/bootstrap/observability.sh's alerts-apply subcommand), both meant to
+# catch exactly the class of failure the Argo Rollouts AnalysisTemplate (Phase 18) cannot: a
+# steady-state gateway regression invisible to ai-service's own metrics, and a Rollout stuck on a
+# canary ReplicaSet whose pods never become Ready in the first place (no traffic ever reaches
+# them, so there is nothing for the AnalysisTemplate to measure). "config: route/receivers" below
+# is deliberately a no-op "null" receiver: Alertmanager really evaluates these rules and really
+# tracks each alert's Pending/Firing/Resolved lifecycle (queryable at its own /api/v2/alerts, see
+# scripts/demo/alerts-status.sh), but nothing pages a human -- there is no real on-call system in
+# this project to page, and faking a Slack/PagerDuty integration nobody receives would be the
+# kind of unverifiable claim this project's own discipline avoids elsewhere (the FinOps rate
+# card, the eval-score Pushgateway). Revisit if a later phase adds a real notification channel.
 
 fullnameOverride: kube-prometheus-stack
 
 alertmanager:
-  enabled: false
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+  config:
+    route:
+      receiver: "null"
+      group_by: ["alertname", "namespace"]
+      group_wait: 30s
+      group_interval: 2m
+      repeat_interval: 1h
+    receivers:
+      - name: "null"
 
 nodeExporter:
   enabled: false
@@ -53,6 +82,13 @@ prometheus:
     serviceMonitorSelectorNilUsesHelmValues: false
     serviceMonitorSelector: {}
     serviceMonitorNamespaceSelector: {}
+    # Same cluster-wide discovery, same reasoning, now for PrometheusRule (Phase 19): without
+    # this, Prometheus only loads rules carrying this chart's own release label, and
+    # alerting-rules.yaml (applied separately, deliberately not part of this Helm release) would
+    # be silently ignored.
+    ruleSelectorNilUsesHelmValues: false
+    ruleSelector: {}
+    ruleNamespaceSelector: {}
     # Short retention: this is a demonstration cluster meant to be torn down and rebuilt
     # (deploy/k3d/cluster.yaml), not a system anyone depends on having historical data from.
     retention: 3d

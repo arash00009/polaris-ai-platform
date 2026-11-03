@@ -1,0 +1,99 @@
+# deploy/platform/observability/alerting-rules.yaml — Phase 19 (ADR-40).
+#
+# Two PrometheusRule resources, applied separately from the kube-prometheus-stack Helm release
+# itself (via `scripts/bootstrap/observability.sh alerts-apply` / `make obs-alerts-apply`) --
+# the same "a plain manifest next to the chart, not baked into its values" pattern this project
+# already uses for the Grafana dashboard ConfigMap (dashboards/ai-service-dashboard-configmap.yaml,
+# Phase 9). Picked up automatically by Prometheus because kube-prometheus-stack-values.yaml sets
+# ruleSelector/ruleNamespaceSelector to {} (this file's own namespace does not need to match
+# anything, and does not need the chart's own release label).
+#
+# Both rules exist specifically to catch what Phase 18's Argo Rollouts AnalysisTemplate cannot --
+# see ADR-40's Context for why each gap is real, not hypothetical:
+#
+#   GatewayTenantRateLimited: ai-gateway is a plain Deployment (ADR-39's own decision -- "the
+#   gateway stays a plain Deployment" -- this phase does not revisit that), so NOTHING gates a
+#   gateway config change before it reaches 100% of traffic. A per-tenant rate-limit/quota
+#   misconfiguration (Phase 14's GATEWAY_TENANT_LIMITS_JSON) can make a real, paying tenant's
+#   traffic start failing with real 429s, and ai-service's own success-rate/latency metrics
+#   (what the AnalysisTemplate queries) never even see it -- the request never reaches
+#   ai-service at all once the gateway itself has rejected it.
+#
+#   AIServiceCrashLooping: a Rollout whose new canary ReplicaSet's pods never become Ready (a
+#   bad image tag, Phase 19's own fault-injection lever below) never starts the analysis step in
+#   the first place -- there is no traffic on those pods for success-rate/latency to measure.
+#   The Rollout just sits stuck "Progressing" with 0% of real traffic ever having moved, which
+#   looks identical to "a slow, healthy rollout" to anything that only watches
+#   ai_requests_total/ai_chat_duration_seconds. kube_pod_container_status_waiting_reason (kube-
+#   state-metrics, already scraped since Phase 9 -- confirmed its exact name/type/labels against
+#   the project's own upstream docs, not assumed) is the one signal that actually distinguishes
+#   "stuck because nothing is wrong yet" from "stuck because it will never succeed."
+#
+# Thresholds and "for" durations below are judgment calls, named here rather than hidden: loose
+# enough that real, bounded rate-limit tuning during Phase 14's own tenant-tiers work would not
+# have paged constantly, tight enough that Phase 19's own deliberate fault injection
+# (scripts/demo/tenant-regression.sh, scripts/demo/break-image-tag.sh) fires them within a few
+# minutes. Confirmed for real against a live cluster, not just unit-tested, is the target-machine
+# verification step -- see docs/failure-engineering.md.
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PrometheusRule
+    metadata:
+      name: ai-gateway-tenant-rate-limited
+      namespace: observability
+      labels:
+        release: kube-prometheus-stack
+    spec:
+      groups:
+        - name: ai-gateway.rules
+          rules:
+            - alert: GatewayTenantRateLimited
+              # rate(), not increase(): a per-second rate is comparable across any "for" window,
+              # where increase()'s raw count is not. 0.05 req/s sustained (effectively "more than
+              # a handful of 429s a minute, for two minutes straight") is deliberately loose --
+              # see this file's header comment.
+              expr: sum by (tenant_id) (rate(ai_gateway_requests_total{outcome="rate_limited"}[5m])) > 0.05
+              for: 2m
+              labels:
+                severity: warning
+              annotations:
+                summary: "Tenant {{ $labels.tenant_id }} is being rate-limited at a sustained rate"
+                description: >-
+                  ai-gateway has rate-limited tenant "{{ $labels.tenant_id }}" at {{ $value | printf "%.2f" }}
+                  req/s for at least 2 minutes. ai-service's own Rollout/AnalysisTemplate (Phase 18) cannot
+                  see this -- the gateway is a plain Deployment and these requests never reach ai-service at
+                  all. Check helm/ai-platform/values-<env>.yaml's config.GATEWAY_TENANT_LIMITS_JSON for a
+                  recent, unintended regression (see docs/failure-engineering.md, Scenario 2).
+  - apiVersion: monitoring.coreos.com/v1
+    kind: PrometheusRule
+    metadata:
+      name: ai-service-crash-looping
+      namespace: observability
+      labels:
+        release: kube-prometheus-stack
+    spec:
+      groups:
+        - name: ai-service.rollout.rules
+          rules:
+            - alert: AIServiceCrashLooping
+              # kube_pod_container_status_waiting_reason is a Gauge that is 1 for the active
+              # reason and absent/0 otherwise (kube-state-metrics docs, confirmed for this ADR --
+              # see its header comment). polaris-.* matches every environment's namespace
+              # (polaris-dev/-staging/-prod) without needing one rule per environment.
+              expr: >-
+                max by (namespace, pod, reason) (
+                  kube_pod_container_status_waiting_reason{namespace=~"polaris-.*", container="ai-service", reason=~"ImagePullBackOff|ErrImagePull|CrashLoopBackOff"}
+                ) == 1
+              for: 2m
+              labels:
+                severity: critical
+              annotations:
+                summary: "ai-service pod {{ $labels.pod }} in {{ $labels.namespace }} cannot start ({{ $labels.reason }})"
+                description: >-
+                  {{ $labels.pod }} has been stuck in {{ $labels.reason }} for at least 2 minutes. If this is
+                  a canary ReplicaSet's pod, the Rollout's own AnalysisTemplate (Phase 18) never even starts
+                  analysing it -- the pod never becomes Ready, so no traffic (and no success-rate/latency
+                  signal) ever reaches it. Check whether the currently-targeted image tag actually exists in
+                  the registry (see docs/failure-engineering.md, Scenario 3) before assuming an application bug.
