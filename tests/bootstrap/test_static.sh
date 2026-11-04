@@ -2029,10 +2029,11 @@ if [[ -x "$CANARY_SCRIPT" ]] && grep -q '\-\-good' "$CANARY_SCRIPT" && grep -q '
 else
   bad "$CANARY_SCRIPT is missing, not executable, or missing --good/--bad"
 fi
-if grep -q 'ENV.*dev' "$CANARY_SCRIPT" 2>/dev/null && grep -q 'MODE.*==.*bad' "$CANARY_SCRIPT" 2>/dev/null; then
-  ok "$CANARY_SCRIPT refuses --bad against --env dev (dev runs the real Ollama backend, not MockBackend)"
+if grep -q 'ENV.*==.*dev' "$CANARY_SCRIPT" 2>/dev/null && grep -q '19999' "$CANARY_SCRIPT" 2>/dev/null \
+  && grep -q 'POLARIS_OPENAI_BASE_URL' "$CANARY_SCRIPT" 2>/dev/null; then
+  ok "$CANARY_SCRIPT points --bad --env dev at an unreachable Ollama port (19999), not a MockBackend refusal (Phase 19/ADR-40)"
 else
-  bad "$CANARY_SCRIPT is missing its --bad/--env dev refusal"
+  bad "$CANARY_SCRIPT is missing its --bad/--env dev fault lever (should point POLARIS_OPENAI_BASE_URL at port 19999)"
 fi
 
 # 151. if shellcheck is available, both new scripts pass it (same bar as every earlier phase's
@@ -2097,6 +2098,88 @@ if grep -E '^\| 18 ' README.md | grep -qvi 'planned'; then
   ok "README.md's Phase 18 status row has moved on from 'Planned'"
 else
   bad "README.md's Phase 18 status row still says Planned (or the row is missing/reworded)"
+fi
+
+# 156. the two new Phase 19 demo scripts exist and implement their real interfaces
+TENANT_SCRIPT="scripts/demo/tenant-regression.sh"
+if [[ -x "$TENANT_SCRIPT" ]] && grep -q -- '--inject' "$TENANT_SCRIPT" && grep -q -- '--revert' "$TENANT_SCRIPT" \
+  && grep -q -- '--status' "$TENANT_SCRIPT" && grep -q 'cmd_inject' "$TENANT_SCRIPT" && grep -q 'cmd_revert' "$TENANT_SCRIPT"; then
+  ok "$TENANT_SCRIPT is executable and implements --inject/--revert/--status"
+else
+  bad "$TENANT_SCRIPT is missing, not executable, or missing --inject/--revert/--status"
+fi
+IMAGE_BREAK_SCRIPT="scripts/demo/break-image-tag.sh"
+if [[ -x "$IMAGE_BREAK_SCRIPT" ]] && grep -q 'GITOPS_DIR' "$IMAGE_BREAK_SCRIPT" \
+  && grep -q 'bump-image-tag.sh' "$IMAGE_BREAK_SCRIPT"; then
+  ok "$IMAGE_BREAK_SCRIPT is executable, takes ENV/GITOPS_DIR, and points to bump-image-tag.sh for recovery"
+else
+  bad "$IMAGE_BREAK_SCRIPT is missing, not executable, or missing its ENV/GITOPS_DIR/recovery pointer"
+fi
+
+# 157. if shellcheck is available, both new Phase 19 demo scripts pass it
+if have shellcheck; then
+  if shellcheck -x -P SCRIPTDIR "$TENANT_SCRIPT" "$IMAGE_BREAK_SCRIPT" >/dev/null 2>&1; then
+    ok "shellcheck: $TENANT_SCRIPT and $IMAGE_BREAK_SCRIPT are clean"
+  else
+    bad "shellcheck found issues in $TENANT_SCRIPT or $IMAGE_BREAK_SCRIPT"
+  fi
+else
+  ok "shellcheck not installed in this sandbox -- skipping (not this phase's gap)"
+fi
+
+# 158. the two new PrometheusRules exist and Alertmanager is turned on for real
+ALERTING_RULES="deploy/platform/observability/alerting-rules.yaml"
+if grep -q 'alert: GatewayTenantRateLimited' "$ALERTING_RULES" 2>/dev/null && grep -q 'alert: AIServiceCrashLooping' "$ALERTING_RULES" 2>/dev/null; then
+  ok "$ALERTING_RULES defines GatewayTenantRateLimited and AIServiceCrashLooping"
+else
+  bad "$ALERTING_RULES is missing GatewayTenantRateLimited or AIServiceCrashLooping"
+fi
+PROM_VALUES="deploy/platform/observability/kube-prometheus-stack-values.yaml"
+if grep -A1 '^alertmanager:' "$PROM_VALUES" 2>/dev/null | grep -q 'enabled: true'; then
+  ok "$PROM_VALUES turns Alertmanager on (alertmanager.enabled: true)"
+else
+  bad "$PROM_VALUES does not enable Alertmanager"
+fi
+
+# 159. scripts/bootstrap/observability.sh implements the three new Phase 19 subcommands
+OBS_SCRIPT="scripts/bootstrap/observability.sh"
+if grep -q 'cmd_alerts_apply' "$OBS_SCRIPT" && grep -q 'cmd_alertmanager' "$OBS_SCRIPT" && grep -q 'cmd_alerts_status' "$OBS_SCRIPT"; then
+  ok "$OBS_SCRIPT implements alerts-apply/alertmanager/alerts-status"
+else
+  bad "$OBS_SCRIPT is missing one of alerts-apply/alertmanager/alerts-status"
+fi
+
+# 160. Makefile: the new Phase 19 targets exist
+for target in obs-alerts-apply obs-alertmanager obs-alerts-status failure-demo-tenant-inject \
+  failure-demo-tenant-revert failure-demo-tenant-status failure-demo-image-break failure-demo-image-revert; do
+  if grep -qE "^${target}:" Makefile; then
+    ok "Makefile target: $target"
+  else
+    bad "Makefile is missing target: $target"
+  fi
+done
+
+# 161. README.md / ADR / docs/failure-engineering.md / docs/component-qa.md all gained Phase 19
+# material
+if grep -q 'ADR-40' docs/adr/README.md 2>/dev/null; then
+  ok "docs/adr/README.md documents ADR-40"
+else
+  bad "docs/adr/README.md is missing ADR-40 (failure engineering)"
+fi
+if [[ -f docs/failure-engineering.md ]]; then
+  ok "docs/failure-engineering.md exists"
+else
+  bad "docs/failure-engineering.md is missing"
+fi
+if grep -qi 'phase 19' docs/component-qa.md 2>/dev/null; then
+  ok "docs/component-qa.md has a Phase 19 section"
+else
+  bad "docs/component-qa.md is missing a Phase 19 section"
+fi
+if grep -E '^\| 19' README.md | grep -qvi 'planned'; then
+  ok "README.md's Phase 19-20 status row has moved on from 'Planned'"
+else
+  bad "README.md's Phase 19-20 status row still says Planned (or the row is missing/reworded)"
 fi
 
 printf '\nPASSED=%d  FAILED=%d\n' "$PASSED" "$FAILED"
