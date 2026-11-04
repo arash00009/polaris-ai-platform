@@ -5,9 +5,11 @@ A → B canary with analysis; failed B rolls back automatically."* See ADR-39 fo
 record, including the real metric gap this phase found and fixed (no latency histogram existed
 before this phase) and why the canary steps are 50% → analysis → 100%, not a finer staircase.
 
-**Status: real progress confirmed on the target machine (Darya), 2026-10-30, with one genuine
-gap found and fixed along the way — the canary itself has not yet promoted or rolled back for
-real.** The one-time Deployment→Rollout migration (§6) and a real Argo Rollouts controller
+**Status: real progress confirmed on the target machine (Darya), 2026-10-30 (one genuine gap
+found and fixed), and the canary itself confirmed promoting for real via Phase 19's own runs
+on `polaris-dev`, 2026-11-01 through 2026-11-03 (`canary-demo-bad`/`-promote`, and a revert-
+then-promote cycle) — see `docs/failure-engineering.md` and ADR-40. Automatic rollback to
+`Degraded` on a bad version has still not been demonstrated for real.** The one-time Deployment→Rollout migration (§6) and a real Argo Rollouts controller
 install (`make rollout-install`) both completed cleanly against `polaris-staging`. Running
 `canary-demo.sh --good` against it surfaced a real, previously undiscovered gap: with
 `serviceMonitor.enabled: false` (Phase 9/ADR-27's original dev-only scoping), Prometheus never
