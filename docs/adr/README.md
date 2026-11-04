@@ -1579,14 +1579,12 @@ project has followed.
 Alertmanager + git-revert for a gateway regression, Alertmanager + `bump-image-tag.sh` for a
 stuck canary), not one chaos tool run three times
 
-Status: accepted. Written and shellchecked in the sandbox (no cluster, no `helm`, no git remote
-access). Scenario 1 is now confirmed for real on the target machine (Darya, 2026-11-01/02) — see
-Consequences below and `docs/failure-engineering.md` section 6 for what that run actually found,
-which turned out to be broader than this scenario's own fault lever. Scenario 2
-(`tenant-regression.sh`), Scenario 3 (`break-image-tag.sh`), and turning on Alertmanager/applying
-`alerting-rules.yaml` have not yet been delivered to or run on Darya at all — still only written
-and shellchecked in the sandbox. See `docs/failure-engineering.md`'s own "Target-machine
-verification" section for the current, honest split.
+Status: accepted. Scenario 1 confirmed for real on the target machine (Darya, 2026-11-01/02);
+Scenarios 2 and 3, and turning on Alertmanager/applying `alerting-rules.yaml`, confirmed for real
+on Darya as well (2026-11-03) — see Consequences below and `docs/failure-engineering.md`
+sections 6 and 7 for what those runs actually found, both broader than this phase's own three
+fault levers. See `docs/failure-engineering.md`'s own "Target-machine verification" section for
+the current state: nothing in this phase's scope remains unverified.
 
 Context: `docs/architecture.md`'s roadmap (section 18) names Phase 19's "Done when" line exactly
 — "Each injected failure is detected by observability and handled by CI/CD + GitOps, with
@@ -1724,14 +1722,34 @@ that the last commit touching `values-dev.yaml` is literally its own injected co
 line before reverting, to avoid reverting someone else's unrelated commit by accident — a
 deliberately conservative check that will refuse to run if anything else touches that file
 in between `--inject` and `--revert` on the target machine, same spirit as `bump-image-tag.sh`'s
-own "is it a clean checkout" guard.
+own "is it a clean checkout" guard. Exercised for real on 2026-11-03 and held correctly: the
+guard matched its own injected commit's subject line and the revert went through cleanly.
+
+A real target-machine finding, 2026-11-03 (Scenarios 2 and 3, run for real on Darya — full
+account in `docs/failure-engineering.md` section 7): both fault levers fired and recovered for
+real, but getting there surfaced four more real gaps, none in the levers themselves. Two were
+load-generation mistakes against the real rate limiter (a naive client timeout that let the
+gateway keep processing abandoned requests until it OOMKilled, and — after fixing that — a
+genuine host-level finding that this machine runs several unrelated Docker projects alongside
+the Polaris cluster with almost no memory margin, so even a small corrected load test could tip
+it into swap-thrashing). One was a real Prometheus gotcha: `rate()` cannot see a brand-new time
+series whose entire rise happens faster than one scrape interval, so the first rejected-request
+burst had to be redesigned to spread across multiple scrape intervals before the alert could
+fire. The fourth repeats Scenario 1's own Finding 2 pattern one level further down the stack:
+Scenario 3's documented recovery (`bump-image-tag.sh`) computes its tag from the current git
+`HEAD`, refusing a dirty tree — and Phase 19's own implementation had been applied to Darya's
+filesystem across earlier sessions but never actually committed, so the revert failed until that
+implementation was committed and its images built and pushed for real. Not a flaw in this ADR's
+Decision — the same "written to disk but not committed" class of gap this phase's own scenarios
+exist to catch, caught here in the tooling that implements them.
 
 Revisit when: a later phase adds a real on-call/notification integration (Alertmanager's
 `"null"` receiver stops being an honest description the moment something actually depends on
 being paged); Scenario 2 is worth extending to `staging`/`prod` once the gateway is proven there
-too; a resource-exhaustion scenario becomes a proven need; or the target-machine run (pending)
-finds a real gap in any of the three scenarios, the same "real cluster is the only real proof"
-discipline every earlier Kubernetes-facing phase in this project has followed.
+too; or this host's own resource margin (section 7's Finding 2) is worth revisiting properly —
+confirmed for real this phase, not a hypothetical fourth case, though no application-level fix
+belongs in this project for a host-level constraint. All three scenarios and Alertmanager are
+now confirmed for real on Darya; nothing in this phase's own scope remains open.
 
 ## Template for a new record
 

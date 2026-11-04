@@ -587,3 +587,39 @@ with both fixes in place, and the migration/controller-install steps against
 | 4. Scale | k6's own `--vus`/`--duration` flags scale the synthetic load independently of anything else in this project; the histogram's fixed, small bucket set (12 buckets) does not grow with traffic volume, only with time. |
 | 5. Security | `scripts/load/chat-load.js` sends traffic tagged `tenant_id="canary-demo"` — distinct from the real gateway tenants (Phase 14) and the eval harness's own `"eval"` tenant (Phase 17), so synthetic canary traffic is never confused with either in `ai_service`'s own tenant-labelled metrics/logs. |
 | 6. Cloud | Generating synthetic load during a canary window to keep an `AnalysisTemplate`'s metrics meaningful (rather than relying on organic production traffic alone, which may be too sparse during a canary's first minutes) is standard real-world progressive-delivery practice, not a local-only workaround. |
+
+## Phase 19
+
+Status: **all three fault-injection scenarios confirmed for real on the target machine (Darya),
+2026-11-01 through 2026-11-03, with real findings along the way for each.** Scenario 1
+(`canary-demo-bad --env dev`) surfaced three real gaps on 2026-11-01/02, the biggest being an
+uncommitted Phase 18 that let Argo CD's own stale `Deployment` silently dilute canary traffic for
+46+ hours. Scenarios 2 and 3 (`tenant-regression.sh`, `break-image-tag.sh`), and turning on
+Alertmanager with the two new `PrometheusRule`s, were confirmed for real on 2026-11-03: both
+alerts fired (`pending`→`firing`, matching their `for: 2m` windows) and cleared after a real
+revert, but getting there surfaced four more real gaps — two load-generation mistakes against
+the real rate limiter, a Prometheus `rate()` gotcha on brand-new time series, and a dirty working
+tree blocking the documented GitOps recovery path. Full record: `docs/failure-engineering.md`,
+ADR-40.
+
+### Three distinct fault levers for three distinct detection gaps, not one chaos tool run three times
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Phase 18 (ADR-39) built real canary analysis, but designing Phase 19 against it found three separate, real gaps rather than one gap repeatable three ways: `dev` had no fault-injection lever at all; `ai-gateway` is a plain `Deployment`, so nothing gates a gateway config regression before it reaches 100% of traffic; and a canary whose pods never become `Ready` carries zero traffic, so the `AnalysisTemplate`'s own metrics never see anything wrong — it just sits `Progressing` indefinitely. |
+| 2. Why | Scenario 1 points `ai-service`'s `dev` config at an unreachable Ollama port, reusing the existing `BackendError` path (zero new application code). Scenario 2 regresses `acme`'s `rate_limit_burst` in `values-dev.yaml` through a real `git commit`/`push`, recovered by a real `git revert` — proving the git-revert-through-CI/CD-through-GitOps path, not a direct `helm upgrade --set` shortcut. Scenario 3 writes a deliberately nonexistent image tag into `polaris-gitops`, recovered by reusing `bump-image-tag.sh` as-is (no new revert logic). |
+| 3. Failure | Two new `PrometheusRule`s (`GatewayTenantRateLimited`, `AIServiceCrashLooping`) and a real Alertmanager (`alertmanager.enabled: true`, a deliberately no-op `"null"` receiver) give each of Scenarios 2 and 3 a real, independently-verifiable alert lifecycle (`make obs-alerts-status` queries the real `/api/v2/alerts` API) — Scenario 1 reuses Phase 18's existing `AnalysisRun` as its own detection signal, needing no new alert. |
+| 4. Scale | Extending Scenario 2 to `staging`/`prod` is one more environment's `values-*.yaml`, not a redesign — not done this phase since `gateway.enabled` is only `true` in `values-dev.yaml` today (Phase 12's scope to revisit, not this one's). |
+| 5. Security | No new secret or credential surface; Alertmanager's `"null"` receiver is named plainly as a no-op rather than faking a Slack/PagerDuty integration nobody receives. |
+| 6. Cloud | Proving detection *and* automated recovery for three structurally different failure classes (a backend outage, a config regression, a stuck rollout) is what a real on-call engineer actually encounters — this phase's choice to find real, distinct gaps rather than one chaos tool run three times is what makes each proof transferable. |
+
+### Running all three demos for real surfaced seven findings this design did not anticipate
+
+| Question | Answer |
+|----------|--------|
+| 1. Problem | Writing and shellchecking a fault-injection script in a sandbox with no cluster proves nothing about whether it actually works — this phase's own standing discipline ("real cluster is the only real proof") required running all three for real on Darya before calling any of them done. |
+| 2. Why | Running them for real found what sandbox testing structurally cannot: Phase 18's own canary had been verified locally but never committed, so Argo CD was silently running a stale `Deployment` alongside it for 46+ hours (Scenario 1); a naive load generator can OOM a service even when every client request times out, because the server keeps processing an abandoned request regardless (Scenario 2); this host runs several unrelated Docker projects with almost no memory margin, so even a corrected, small load test can tip it into swap-thrashing (Scenario 2); Prometheus's `rate()` cannot see a brand-new time series whose entire rise happens faster than one scrape interval (Scenario 2); and `bump-image-tag.sh`'s tag computation requires a clean, committed, already-built-and-pushed working tree, which Darya's wasn't — Phase 19's own implementation had been applied to disk but never committed (Scenario 3). |
+| 3. Failure | Every one of these was caught by running the real thing against a real cluster, not by code review or shellcheck — the exact reason this project's "verify, don't guess" discipline exists. None was a flaw in this ADR's own decisions; all were caught in the surrounding environment or tooling, exactly what these scenarios exist to prove can be caught at all. |
+| 4. Scale | None of these findings change this phase's own scope — they are operational facts about this machine and these scripts, named in `docs/failure-engineering.md` section 7 and ADR-40 rather than silently fixed and forgotten. |
+| 5. Security | N/A — no finding here touched a secret or credential surface. |
+| 6. Cloud | A resource-constrained shared host is exactly the kind of real-world constraint a hosted, dedicated cluster would not have — named plainly as a host-level limitation, not a flaw in the fault levers themselves, and not worth an application-level workaround in this project. |

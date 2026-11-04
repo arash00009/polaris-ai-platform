@@ -201,21 +201,99 @@ for real here. And `kubectl -n observability get prometheusrules` showed only th
 above) have never actually been applied to `polaris-dev` (`make obs-alerts-apply` not yet run),
 named here rather than assumed working.
 
+## 7. Scenarios 2 and 3 — confirmed for real on Darya (2026-11-03), with real findings this design did not anticipate
+
+`make failure-demo-tenant-inject ARGS="--env dev --push"` and `make failure-demo-image-break
+ENV=dev ARGS=--push` were both run for real, end to end: inject, load, alert fires, revert, alert
+clears. Both scenarios' core claim held — but getting there surfaced four real gaps, none of
+them in the fault levers themselves.
+
+**Finding 1 — a naive load generator can crash the gateway even when every individual client
+request times out, because the server keeps processing an abandoned request long after the
+client gives up.** The first load-test design used a short (2-second) client-side timeout in a
+sequential loop against the rate-limited endpoint. Every request was abandoned client-side well
+before it got a response — but the gateway's own logs showed each one still being processed for
+the full ~90s upstream timeout regardless, because the server has no way to know the client gave
+up. With `rate_limit_burst=1` refilling every 0.5s and the client sending slower than that,
+almost nothing was actually rejected (429) — nearly every request was accepted, forwarded, and
+abandoned-but-still-processing, accumulating unboundedly until the gateway pod was `OOMKilled`
+(`exitCode 137`). Fixed by redesigning the load generator to always wait for the full response
+(`timeout=95`, matching the real upstream timeout) before sending the next request, with
+concurrency hard-capped at 2 threads.
+
+**Finding 2 — this host runs several unrelated Docker projects alongside the Polaris cluster
+with almost no memory margin at idle, so even that corrected, deliberately small (2-concurrent)
+load test was enough to tip the whole node into swap-thrashing.** `kubectl top node`, `free -h`,
+and `docker ps` showed `kind-control-plane`, `hivebox-control-plane`, and three `coolify-*`
+containers running alongside the `k3d-polaris-*` cluster on a single 6-core/10GB host, with
+144–150Mi free and swap already in use even before the test started. The 2-concurrent load was
+enough to push it into heavy swap-thrashing, causing cascading kubelet probe failures and
+`OOMKilled` events across pods that had nothing to do with the test. Not a bug in the fault
+levers — a real environmental constraint of running this cluster alongside other local projects
+on one machine. Worked around, with the user's explicit choice, by temporarily stopping the 5
+unrelated containers (`docker stop coolify-realtime coolify-db coolify-redis
+hivebox-control-plane kind-control-plane` — every `k3d-polaris-*` container and the local
+registry were left untouched), which freed memory to 2.0Gi/4.1Gi available and let load average
+decay back to normal.
+
+**Finding 3 — Prometheus's `rate()` cannot see a brand-new time series whose entire rise happens
+faster than one scrape interval.** Even after the fix above, a cleanly-run burst of 29 rejected
+(429) requests completed in 19 seconds produced no alert at all — `ALERTS{alertname=
+"GatewayTenantRateLimited"}` over the following 15 minutes came back completely empty, despite
+`ai_gateway_requests_total{outcome="rate_limited",tenant_id="acme"}` correctly showing `29` and
+both `PrometheusRule`s reporting `health=ok`. Root cause: this label combination (`tenant_id=
+"acme", outcome="rate_limited"`) had never existed before, so its very first Prometheus sample
+likely landed after the whole 19-second burst had already finished — the series jumped straight
+from nonexistent to `29` with no earlier, lower sample in between, so `rate()` over any two
+subsequent (flat) samples is `0`. `scrapeInterval`/`evaluationInterval` are both `30s` in this
+cluster — shorter than the burst. Fixed by spreading the triggering requests across 24 pairs, 10
+seconds apart (240 seconds total), so multiple 30-second scrape intervals each captured the
+counter mid-rise; the alert then went `pending` for ~105s and `firing` for ~165s, confirmed via
+`ALERTS` query history.
+
+**Finding 4 — `scripts/gitops/bump-image-tag.sh`'s tag computation (current git `HEAD` plus a
+`-dirty` suffix whenever `git status --porcelain` is non-empty) means Scenario 3's own
+documented recovery path requires a clean, committed working tree on the target machine — which
+Darya's wasn't.** Running `make failure-demo-image-revert ENV=dev ARGS=--push` failed
+immediately with `Tag 0.4.0-a3e0a61cb865-dirty is not in the local registry` — Phase 19's own
+implementation (the Makefile targets, `kube-prometheus-stack-values.yaml`'s Alertmanager change,
+`observability.sh`'s new subcommands, `alerting-rules.yaml`, and `scripts/demo/` itself) had been
+delivered to and applied on Darya's filesystem across earlier sessions, but never actually
+committed to git — the same "written to disk but not committed" gap Scenario 1's Finding 2
+(section 6) found for Phase 18. Fixed for real: committed and pushed the Phase 19 implementation
+(`c40aabe`), then ran `make image-build && make image-push` and `make gateway-image-build &&
+make gateway-image-push` for that commit (both `ai-service` and `ai-gateway` images, since
+`values-dev.yaml` has `gateway.enabled: true`) before the revert would accept the computed,
+now-clean tag. This is a real, general operational fact about this recovery script, not specific
+to this one run: **any Scenario 3 revert on this machine first requires a clean, committed,
+already-built-and-pushed working tree**, worth calling out plainly rather than assuming the
+happy path.
+
+Both scenarios' full inject → alert-fires → revert → alert-clears cycles are confirmed with
+timestamped Prometheus `ALERTS` evidence (`pending` then `firing`, matching each rule's `for: 2m`
+window) and a final healthy cluster state: `GatewayTenantRateLimited` and `AIServiceCrashLooping`
+both clear after their respective reverts, `ai-gateway-config`'s `acme` burst is back to `40`,
+and the `ai-service` Rollout is `Healthy` on the real, recovered image tag (its own canary
+`AnalysisRun` landed `Inconclusive` rather than `Failed` or passing — the same Finding 3 from
+Scenario 1's own session, section 6 — and needed a manual `canary-demo-promote` to finish, not a
+new gap).
+
 ## Target-machine verification
 
-**Scenario 1: confirmed for real on Darya, 2026-11-01/02 — see section 6 above for what was
-actually found, which is broader than this scenario's own fault lever.** Scenario 2
-(`tenant-regression.sh`) and Scenario 3 (`break-image-tag.sh`), and applying
-`alerting-rules.yaml`/turning on Alertmanager, are **still only written and shellchecked in the
-sandbox** — they have not yet been delivered to or run on Darya at all. Confirming that
-Alertmanager actually installs, that both `PrometheusRule`s are actually discovered, and that
-Scenarios 2 and 3 actually fire and recover for real against a live cluster remains open, the
-same "real cluster is the only real proof" discipline every earlier phase has followed.
+**All three scenarios are now confirmed for real on Darya.** Scenario 1: 2026-11-01/02 — see
+section 6. Scenarios 2 and 3: 2026-11-03 — see section 7. Alertmanager is installed and running
+(`2/2 Running`), both `PrometheusRule`s are discovered and healthy, and all three fault levers
+were run end to end against the live cluster with Prometheus's own `ALERTS` time series as
+evidence of each alert's Pending→Firing→(cleared) lifecycle. Nothing in this phase's own scope
+remains unverified; see section 7's own findings for what the verification work itself
+surfaced.
 
 ## Revisit when
 
 A later phase adds a real on-call/notification integration (Alertmanager's `"null"` receiver
 stops being honest the moment something actually depends on being paged); Scenario 2 is worth
 extending to `staging`/`prod` once the gateway is proven there too (Phase 12/18's own scope, not
-this phase's); or a resource-exhaustion scenario becomes a proven need rather than a
-hypothetical fourth case. See ADR-40 for the full decision record.
+this phase's); or this host's own resource margin (section 7, Finding 2) is worth revisiting
+properly — confirmed for real this phase, not still a hypothetical fourth case, though no
+application-level fix belongs in this project for a host-level constraint. See ADR-40 for the
+full decision record.
